@@ -30,6 +30,8 @@ const LOCATIONS_COLLECTION = 'locations';
 function sanitizePinForFirestore(loc: LocationPin) {
   return {
     id: loc.id,
+    googlePlaceId: loc.googlePlaceId || '',
+    source: loc.source || 'custom',
     name: loc.name,
     category: loc.category,
     address: loc.address,

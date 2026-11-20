@@ -4,8 +4,8 @@
  */
 
 import React, { useState } from 'react';
-import { LocationPin, Review } from '../types/accessibility';
-import { getVenuePatronPerk } from '../utils/storage';
+import { ClaimedOwnerInfo, LocationPin, OwnerResponse, Review } from '../types/accessibility';
+import { AuthUser, getVenuePatronPerk } from '../utils/storage';
 import { useA11y } from '../context/A11yContext';
 import { LocationOverviewCard } from './location-detail/LocationOverviewCard';
 import { AiAnalysisSection } from './location-detail/AiAnalysisSection';
@@ -15,23 +15,42 @@ import { X, Share2, Sparkles, Bookmark, ShieldCheck, Ticket, Copy, Check } from 
 
 interface LocationDetailDrawerProps {
   location: LocationPin | null;
-  currentUserName?: string;
+  currentUser: AuthUser;
   isSaved?: boolean;
   onToggleSave?: (locationId: string) => void;
   onClose: () => void;
   onVoteTag: (pinId: string, tagName: string, vote: 'confirm' | 'dispute') => void;
-  onAddReview: (pinId: string, review: Omit<Review, 'id' | 'date'>) => void;
+  onAddOrUpdateReview: (
+    pinId: string,
+    review: Omit<Review, 'id' | 'date'>,
+    existingReviewId?: string,
+    triggersCircuitBreaker?: boolean
+  ) => void;
+  onVoteReview: (pinId: string, reviewId: string, vote: 'confirm' | 'inaccurate') => void;
+  onQuarantineReview: (pinId: string, reviewId: string, reason: string) => void;
+  onClaimOwner: (pinId: string, ownerInfo: ClaimedOwnerInfo) => void;
+  onOwnerReply: (pinId: string, reviewId: string, response: OwnerResponse) => void;
+  onModerateReview: (
+    pinId: string,
+    reviewId: string,
+    newStatus: 'published' | 'removed'
+  ) => void;
   onRunAIScanOnPin: (location: LocationPin) => void;
 }
 
 export const LocationDetailDrawer: React.FC<LocationDetailDrawerProps> = ({
   location,
-  currentUserName,
+  currentUser,
   isSaved = false,
   onToggleSave,
   onClose,
   onVoteTag,
-  onAddReview,
+  onAddOrUpdateReview,
+  onVoteReview,
+  onQuarantineReview,
+  onClaimOwner,
+  onOwnerReply,
+  onModerateReview,
   onRunAIScanOnPin,
 }) => {
   const { announce } = useA11y();
@@ -195,8 +214,13 @@ export const LocationDetailDrawer: React.FC<LocationDetailDrawerProps> = ({
 
         <ReviewSection
           location={location}
-          currentUserName={currentUserName}
-          onAddReview={onAddReview}
+          currentUser={currentUser}
+          onAddOrUpdateReview={onAddOrUpdateReview}
+          onVoteReview={onVoteReview}
+          onQuarantineReview={onQuarantineReview}
+          onClaimOwner={onClaimOwner}
+          onOwnerReply={onOwnerReply}
+          onModerateReview={onModerateReview}
           onAnnounce={announce}
         />
       </div>

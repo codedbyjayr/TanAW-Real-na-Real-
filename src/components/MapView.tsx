@@ -3,667 +3,1045 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
-import { CategoryType, LocationPin } from '../types/accessibility';
+import { LocationPin, CategoryType } from '../types/accessibility';
 import { getRatingColor } from '../utils/storage';
 import {
   CityPreset,
   DEFAULT_CDO_CENTER,
-  MINDANAO_CITY_PRESETS,
   RoutePreviewResult,
-  buildClusterPinHtml,
+  getCategoryIconSvg,
   buildInteractivePinHtml,
-  computeMapClusters,
-  detectActiveCityPreset,
-  fetchAccessibleRoute,
 } from '../utils/routingAndSpatial';
+import {
+  MINDANAO_BOUNDS,
+  MINDANAO_ESTABLISHMENT_MAP_STYLES,
+  loadGoogleMaps,
+  buildGoogleMarkerSvg,
+  buildEstablishmentMarkerSvg,
+} from '../utils/googleMapsLoader';
+import {
+  DiscoveredEstablishment,
+  discoverNearbyEstablishments,
+  fetchPlaceDetailsById,
+} from '../utils/mindanaoPlaces';
 import { useA11y } from '../context/A11yContext';
 import { MapFloatingCard } from './MapFloatingCard';
-import { MapSearchFilterBar } from './MapSearchFilterBar';
+import { MobileRiftFloraLayout } from './mobile/MobileRiftFloraLayout';
 import {
-  Crosshair,
   Locate,
-  MapPin,
   ZoomIn,
   ZoomOut,
   Layers,
   Check,
+  Radar,
+  Crosshair,
+  Navigation,
+  Sparkles,
+  Eye,
+  Key,
+  ShieldAlert,
+  X,
+  Menu,
 } from 'lucide-react';
 
-interface MapViewProps {
+export type GoogleMapStyle = 'roadmap' | 'satellite' | 'hybrid' | 'terrain';
+export type MapTileStyle = GoogleMapStyle;
+
+export interface ClickedGooglePoi {
+  googlePlaceId: string;
+  name: string;
+  address: string;
+  category: CategoryType;
+  lat: number;
+  lng: number;
+}
+
+export interface MapViewProps {
   locations: LocationPin[];
-  totalLocationsCount: number;
+  totalLocationsCount?: number;
   selectedLocation: LocationPin | null;
   onSelectLocation: (loc: LocationPin) => void;
   onOpenDetails: (loc: LocationPin) => void;
+  onRatePlace?: (loc: LocationPin) => void;
+  onSelectGooglePoi?: (poi: ClickedGooglePoi) => void;
   isAddingLocation: boolean;
   newPinCoords: { lat: number; lng: number } | null;
   onNewPinCoordsChange: (coords: { lat: number; lng: number }) => void;
-  searchQuery: string;
-  onSearchChange: (q: string) => void;
-  selectedCategory: CategoryType | 'All';
-  onCategoryChange: (cat: CategoryType | 'All') => void;
-  onResetFilters: () => void;
-  onOpenHowItWorks?: () => void;
-  isPlacesPanelOpen?: boolean;
+  activeCity: CityPreset;
+  activeRoute: RoutePreviewResult | null;
+  isRoutingLoading?: boolean;
+  onToggleRoutePreview: (loc: LocationPin) => void;
+  onClearRoute: () => void;
+  userCoords: { lat: number; lng: number } | null;
+  onUserCoordsChange: (coords: { lat: number; lng: number } | null) => void;
+  nearbyRadiusKm: number | null;
+  onNearbyRadiusChange: (radius: number | null) => void;
+  searchQuery?: string;
+  onSearchChange?: (q: string) => void;
+  selectedCategory?: CategoryType | 'All';
+  onCategoryChange?: (cat: CategoryType | 'All') => void;
+  onOpenAIAnalyzer?: () => void;
+  onRunAIScan?: (loc: LocationPin | null) => void;
+  onNavigateTab?: (tabId: string) => void;
+  onOpenMobileMenu?: () => void;
 }
 
-export type MapTileStyle = 'osm' | 'hot';
+const GOOGLE_MAP_STYLES: Array<{ id: GoogleMapStyle; label: string; desc: string }> = [
+  { id: 'roadmap', label: 'Standard Roadmap', desc: 'Clean street & infrastructure map' },
+  { id: 'satellite', label: 'Satellite', desc: 'High-resolution satellite imagery' },
+  { id: 'hybrid', label: 'Hybrid', desc: 'Satellite imagery with street labels' },
+  { id: 'terrain', label: 'Terrain', desc: 'Topographic elevation & physical features' },
+];
 
-interface TileConfig {
-  name: string;
-  label: string;
-  url: string;
-  attribution: string;
-  maxZoom: number;
-}
-
-const TILE_CONFIGS: Record<MapTileStyle, TileConfig> = {
-  osm: {
-    name: 'OpenStreetMap (Standard)',
-    label: 'Standard Map',
-    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxZoom: 19,
-  },
-  hot: {
-    name: 'OpenStreetMap Humanitarian',
-    label: 'Humanitarian',
-    url: 'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxZoom: 19,
-  },
+const LEAFLET_TILES: Record<GoogleMapStyle, string> = {
+  roadmap: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  hybrid: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  terrain: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
 };
-
-const MINDANAO_CENTER: [number, number] = [7.5, 125.0];
-const DEFAULT_ZOOM = 7;
 
 export const MapView: React.FC<MapViewProps> = ({
   locations,
-  totalLocationsCount,
   selectedLocation,
   onSelectLocation,
   onOpenDetails,
+  onRatePlace,
+  onSelectGooglePoi,
   isAddingLocation,
   newPinCoords,
   onNewPinCoordsChange,
-  searchQuery,
-  onSearchChange,
-  selectedCategory,
-  onCategoryChange,
-  onResetFilters,
-  onOpenHowItWorks,
-  isPlacesPanelOpen = false,
+  activeCity,
+  activeRoute,
+  isRoutingLoading = false,
+  onToggleRoutePreview,
+  onClearRoute,
+  userCoords,
+  onUserCoordsChange,
+  nearbyRadiusKm,
+  onNearbyRadiusChange,
+  searchQuery = '',
+  onSearchChange = () => {},
+  selectedCategory = 'All',
+  onCategoryChange = () => {},
+  onOpenAIAnalyzer,
+  onRunAIScan,
+  onNavigateTab,
+  onOpenMobileMenu,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<L.Map | null>(null);
-  const tileLayerRef = useRef<L.TileLayer | null>(null);
-  const markersLayerRef = useRef<L.LayerGroup | null>(null);
-  const newPinMarkerRef = useRef<L.Marker | null>(null);
-  const userLocationLayerRef = useRef<L.LayerGroup | null>(null);
-  const routeLayerRef = useRef<L.LayerGroup | null>(null);
-  const isAddingLocationRef = useRef<boolean>(isAddingLocation);
+  const leafletContainerRef = useRef<HTMLDivElement>(null);
+  const streetViewContainerRef = useRef<HTMLDivElement>(null);
+
+  const googleMapInstanceRef = useRef<any>(null);
+  const markersRef = useRef<any[]>([]);
+  const establishmentMarkersRef = useRef<any[]>([]);
+  const newPinMarkerRef = useRef<any>(null);
+  const userMarkerRef = useRef<any>(null);
+  const userCircleRef = useRef<any>(null);
+  const routePolylineRef = useRef<any>(null);
+  const routeCasingRef = useRef<any>(null);
+  const streetViewPanoramaRef = useRef<any>(null);
+
+  // Interactive fallback Leaflet refs when Google Maps API key is not configured
+  const leafletMapRef = useRef<L.Map | null>(null);
+  const leafletTileRef = useRef<L.TileLayer | null>(null);
+  const leafletMarkersRef = useRef<L.LayerGroup | null>(null);
+  const leafletRouteRef = useRef<L.LayerGroup | null>(null);
+
+  const { announce } = useA11y();
+  const [isLocating, setIsLocating] = useState(false);
+  const [showSummaryCard, setShowSummaryCard] = useState(true);
+  const [mapStyle, setMapStyle] = useState<GoogleMapStyle>('roadmap');
+  const [showLayerPicker, setShowLayerPicker] = useState(false);
+  const [showRadiusPicker, setShowRadiusPicker] = useState(false);
+  const [showStreetView, setShowStreetView] = useState(false);
+  const [dismissKeyNotice, setDismissKeyNotice] = useState(false);
+  const [showEstablishments, setShowEstablishments] = useState(true);
+  const [discoveredEstablishments, setDiscoveredEstablishments] = useState<DiscoveredEstablishment[]>([]);
+  const [selectedUnratedEst, setSelectedUnratedEst] = useState<DiscoveredEstablishment | null>(null);
+  const [placesNotice, setPlacesNotice] = useState<string | null>(null);
+  const [poiLoadingLabel, setPoiLoadingLabel] = useState<string | null>(null);
+  const onSelectGooglePoiRef = useRef(onSelectGooglePoi);
+  const isAddingLocationRef = useRef(isAddingLocation);
+  const showEstablishmentsRef = useRef(showEstablishments);
+
+  useEffect(() => {
+    onSelectGooglePoiRef.current = onSelectGooglePoi;
+  }, [onSelectGooglePoi]);
 
   useEffect(() => {
     isAddingLocationRef.current = isAddingLocation;
   }, [isAddingLocation]);
 
-  const { highContrast, announce } = useA11y();
-  const [isLocating, setIsLocating] = useState(false);
-  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [showSummaryCard, setShowSummaryCard] = useState(true);
-
-  const [currentZoom, setCurrentZoom] = useState<number>(DEFAULT_ZOOM);
-  const [activeCity, setActiveCity] = useState<CityPreset>(MINDANAO_CITY_PRESETS[0]);
-
-  const [activeRoute, setActiveRoute] = useState<RoutePreviewResult | null>(null);
-  const [isRoutingLoading, setIsRoutingLoading] = useState(false);
-
-  const [mapStyle, setMapStyle] = useState<MapTileStyle>('osm');
-  const [showLayerPicker, setShowLayerPicker] = useState(false);
-
-  // Initialize Map with OpenStreetMap + Leaflet
   useEffect(() => {
-    if (!mapContainerRef.current || mapInstanceRef.current) return;
+    showEstablishmentsRef.current = showEstablishments;
+    if (!showEstablishments) {
+      setDiscoveredEstablishments([]);
+      setSelectedUnratedEst(null);
+    }
+  }, [showEstablishments]);
 
-    const map = L.map(mapContainerRef.current, {
-      center: MINDANAO_CENTER,
-      zoom: DEFAULT_ZOOM,
-      zoomControl: false,
-    });
+  const [googleLoadError, setGoogleLoadError] = useState<string | null>(null);
+  const hasApiKey = Boolean(import.meta.env.VITE_GOOGLE_MAPS_API_KEY);
+  const useFallbackInteractiveMap = !hasApiKey || Boolean(googleLoadError);
 
-    mapInstanceRef.current = map;
+  // 1. Initialize Google Map when VITE_GOOGLE_MAPS_API_KEY is present
+  useEffect(() => {
+    let isMounted = true;
+    if (!hasApiKey) return;
 
-    const activeConfig = TILE_CONFIGS[mapStyle];
-    const tileLayer = L.tileLayer(activeConfig.url, {
-      maxZoom: activeConfig.maxZoom,
-      attribution: activeConfig.attribution,
-    }).addTo(map);
-
-    tileLayerRef.current = tileLayer;
-
-    const routeLayer = L.layerGroup().addTo(map);
-    routeLayerRef.current = routeLayer;
-
-    const userLayer = L.layerGroup().addTo(map);
-    userLocationLayerRef.current = userLayer;
-
-    const markersLayer = L.layerGroup().addTo(map);
-    markersLayerRef.current = markersLayer;
-
-    const updateViewportState = () => {
-      const z = map.getZoom();
-      const center = map.getCenter();
-      setCurrentZoom(z);
-      setActiveCity(detectActiveCityPreset(center.lat, center.lng, z));
+    (window as any).gm_authFailure = () => {
+      if (isMounted) {
+        setGoogleLoadError('Google Maps API key authentication or billing check failed — switched to OpenStreetMap tiles.');
+      }
     };
 
-    map.on('zoomend', updateViewportState);
-    map.on('moveend', updateViewportState);
+    loadGoogleMaps()
+      .then((googleMaps) => {
+        if (!isMounted || !mapContainerRef.current) return;
 
-    // Only update newPinCoords when user is actively in "Add Location" mode
+        const initialCenter = activeCity
+          ? { lat: activeCity.lat, lng: activeCity.lng }
+          : { lat: DEFAULT_CDO_CENTER.lat, lng: DEFAULT_CDO_CENTER.lng };
+
+        const map = new googleMaps.Map(mapContainerRef.current, {
+          center: initialCenter,
+          zoom: activeCity?.zoom || 13,
+          minZoom: 7,
+          mapTypeId: mapStyle,
+          styles: MINDANAO_ESTABLISHMENT_MAP_STYLES,
+          disableDefaultUI: true,
+          gestureHandling: 'greedy',
+          restriction: {
+            latLngBounds: MINDANAO_BOUNDS,
+            strictBounds: true,
+          },
+          clickableIcons: true,
+        });
+
+        googleMapInstanceRef.current = map;
+
+        // Discover real Mindanao establishments on map idle (Places API New, capped ~40, de-duped by placeId)
+        let idleFetchId = 0;
+        map.addListener('idle', () => {
+          if (!showEstablishmentsRef.current) return;
+          const zoom = map.getZoom();
+          if (zoom < 11) return; // Avoid broad island-wide nearby queries when zoomed all the way out
+          const centerObj = map.getCenter();
+          if (!centerObj) return;
+
+          const currentFetch = ++idleFetchId;
+          const radiusMeters = zoom >= 15 ? 1200 : zoom >= 13 ? 3000 : 7000;
+          discoverNearbyEstablishments(
+            { lat: centerObj.lat(), lng: centerObj.lng() },
+            radiusMeters,
+            40
+          )
+            .then((list) => {
+              if (!isMounted || currentFetch !== idleFetchId || !showEstablishmentsRef.current) {
+                return;
+              }
+              setPlacesNotice(null);
+              setDiscoveredEstablishments(list);
+            })
+            .catch(() => {
+              if (isMounted && currentFetch === idleFetchId) {
+                setPlacesNotice(
+                  'Google Places discovery unavailable — check that Places API (New) is enabled on your key. Community pins remain active.'
+                );
+              }
+            });
+        });
+
+        map.addListener('click', (e: any) => {
+          // Click directly on a Google Maps POI -> fetch via Places API (New) Place.fetchFields
+          if (e.placeId) {
+            e.stop();
+            setPoiLoadingLabel('Loading establishment details...');
+            fetchPlaceDetailsById(e.placeId)
+              .then((est) => {
+                setPoiLoadingLabel(null);
+                if (!est) return;
+                setSelectedUnratedEst(est);
+                setShowSummaryCard(true);
+                onSelectGooglePoiRef.current?.(est);
+              })
+              .catch(() => {
+                setPoiLoadingLabel(null);
+                setPlacesNotice('Could not fetch establishment details (ensure Places API New is enabled).');
+              });
+            return;
+          }
+
+          if (!e.latLng) return;
+          const coords = { lat: e.latLng.lat(), lng: e.latLng.lng() };
+          if (isAddingLocationRef.current) {
+            onNewPinCoordsChange(coords);
+          } else {
+            setShowSummaryCard(false);
+            setSelectedUnratedEst(null);
+          }
+        });
+      })
+      .catch((err) => {
+        if (isMounted) {
+          setGoogleLoadError(err.message || 'Could not load Google Maps SDK');
+        }
+      });
+
+    return () => {
+      isMounted = false;
+      if (googleMapInstanceRef.current && window.google?.maps?.event) {
+        window.google.maps.event.clearInstanceListeners(googleMapInstanceRef.current);
+      }
+    };
+  }, [hasApiKey]);
+
+  // 2. Initialize Interactive Fallback Map when VITE_GOOGLE_MAPS_API_KEY is not set
+  useEffect(() => {
+    if (!useFallbackInteractiveMap || !leafletContainerRef.current || leafletMapRef.current) return;
+
+    const initialCenter = activeCity
+      ? ([activeCity.lat, activeCity.lng] as [number, number])
+      : ([DEFAULT_CDO_CENTER.lat, DEFAULT_CDO_CENTER.lng] as [number, number]);
+
+    const map = L.map(leafletContainerRef.current, {
+      center: initialCenter,
+      zoom: activeCity?.zoom || 8,
+      minZoom: 7,
+      zoomControl: false,
+      maxBounds: [
+        [MINDANAO_BOUNDS.south, MINDANAO_BOUNDS.west],
+        [MINDANAO_BOUNDS.north, MINDANAO_BOUNDS.east],
+      ],
+    });
+
+    const tile = L.tileLayer(LEAFLET_TILES[mapStyle], {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors',
+    }).addTo(map);
+
+    const markersGroup = L.layerGroup().addTo(map);
+    const routeGroup = L.layerGroup().addTo(map);
+
     map.on('click', (e: L.LeafletMouseEvent) => {
-      if (isAddingLocationRef.current) {
+      if (isAddingLocation) {
         onNewPinCoordsChange({ lat: e.latlng.lat, lng: e.latlng.lng });
+      } else {
+        setShowSummaryCard(false);
       }
     });
+
+    leafletMapRef.current = map;
+    leafletTileRef.current = tile;
+    leafletMarkersRef.current = markersGroup;
+    leafletRouteRef.current = routeGroup;
 
     return () => {
       map.remove();
-      mapInstanceRef.current = null;
+      leafletMapRef.current = null;
     };
-  }, []);
+  }, [useFallbackInteractiveMap]);
 
-  // Update Tile Layer when mapStyle changes
+  // Update Map Type (Roadmap / Satellite / Hybrid / Terrain)
   useEffect(() => {
-    if (!mapInstanceRef.current || !tileLayerRef.current) return;
-
-    const map = mapInstanceRef.current;
-    map.removeLayer(tileLayerRef.current);
-
-    const activeConfig = TILE_CONFIGS[mapStyle];
-    const newLayer = L.tileLayer(activeConfig.url, {
-      maxZoom: activeConfig.maxZoom,
-      attribution: activeConfig.attribution,
-    }).addTo(map);
-
-    tileLayerRef.current = newLayer;
+    if (googleMapInstanceRef.current) {
+      googleMapInstanceRef.current.setMapTypeId(mapStyle);
+    }
+    if (leafletTileRef.current) {
+      leafletTileRef.current.setUrl(LEAFLET_TILES[mapStyle]);
+    }
   }, [mapStyle]);
 
-  // Render Clustered & Category-Aware Location Markers
+  // Pan to active city when changed
   useEffect(() => {
-    if (!mapInstanceRef.current || !markersLayerRef.current) return;
-
-    const map = mapInstanceRef.current;
-    const layer = markersLayerRef.current;
-    layer.clearLayers();
-
-    const renderItems = computeMapClusters(
-      locations,
-      currentZoom,
-      selectedLocation?.id
-    );
-    const showRatingPill = currentZoom >= 13;
-
-    renderItems.forEach((item) => {
-      if (item.isCluster) {
-        const clusterIcon = L.divIcon({
-          className: 'custom-pin-marker',
-          html: buildClusterPinHtml(item),
-          iconSize: [52, 62],
-          iconAnchor: [26, 31],
-        });
-
-        const clusterMarker = L.marker([item.lat, item.lng], {
-          icon: clusterIcon,
-          title: `${item.count} accessible locations (Click to expand)`,
-        });
-
-        clusterMarker.on('click', () => {
-          map.flyToBounds(item.bounds, {
-            padding: [70, 70],
-            maxZoom: Math.min(16, currentZoom + 3),
-            duration: 0.75,
-          });
-          announce(`Expanded cluster of ${item.count} venues.`);
-        });
-
-        clusterMarker.addTo(layer);
-      } else {
-        const loc = item.location;
-        const isSelected = selectedLocation?.id === loc.id;
-        const colorMeta = getRatingColor(loc.averageRating, loc.totalReviews);
-        const ratingText = loc.averageRating > 0 ? loc.averageRating.toFixed(1) : 'Unrated';
-
-        const customIcon = L.divIcon({
-          className: 'custom-pin-marker',
-          html: buildInteractivePinHtml(loc, isSelected, showRatingPill),
-          iconSize: [44, 58],
-          iconAnchor: [22, 46],
-        });
-
-        const marker = L.marker([item.lat, item.lng], {
-          icon: customIcon,
-          title: `${loc.name} (${colorMeta.label})`,
-          zIndexOffset: isSelected ? 1000 : 0,
-        });
-
-        marker.bindTooltip(
-          `<div style="font-weight:800;font-size:12px;color:#0f172a;">${loc.name}</div>
-           <div style="font-size:10px;font-weight:600;color:#475569;">${loc.category} • ${ratingText}★</div>`,
-          {
-            direction: 'top',
-            offset: [0, -42],
-            opacity: 0.96,
-          }
-        );
-
-        marker.on('click', () => {
-          onSelectLocation(loc);
-          setShowSummaryCard(true);
-          announce(`Selected location: ${loc.name}, rated ${ratingText} stars.`);
-        });
-
-        marker.addTo(layer);
-      }
-    });
-  }, [locations, currentZoom, selectedLocation]);
-
-  // Center on selected location if changed
-  useEffect(() => {
-    if (selectedLocation && mapInstanceRef.current) {
-      mapInstanceRef.current.flyTo(
-        [selectedLocation.lat, selectedLocation.lng],
-        Math.max(mapInstanceRef.current.getZoom(), 15),
-        { duration: 0.8 }
-      );
-      setShowSummaryCard(true);
+    if (!activeCity) return;
+    if (googleMapInstanceRef.current) {
+      googleMapInstanceRef.current.panTo({ lat: activeCity.lat, lng: activeCity.lng });
+      googleMapInstanceRef.current.setZoom(activeCity.zoom);
     }
-  }, [selectedLocation]);
+    if (leafletMapRef.current) {
+      leafletMapRef.current.flyTo([activeCity.lat, activeCity.lng], activeCity.zoom, {
+        duration: 0.8,
+      });
+    }
+  }, [activeCity?.id]);
 
-  // Render User GPS Marker
+  // Center on selected location
   useEffect(() => {
-    if (!mapInstanceRef.current || !userLocationLayerRef.current) return;
-    const layer = userLocationLayerRef.current;
-    layer.clearLayers();
+    if (!selectedLocation) return;
+    setShowSummaryCard(true);
 
-    if (!userCoords) return;
+    if (googleMapInstanceRef.current) {
+      googleMapInstanceRef.current.panTo({
+        lat: selectedLocation.lat,
+        lng: selectedLocation.lng,
+      });
+      googleMapInstanceRef.current.setZoom(Math.max(googleMapInstanceRef.current.getZoom(), 15));
 
-    const userIcon = L.divIcon({
-      className: 'custom-pin-marker',
-      html: `
-        <div style="position: relative; width: 26px; height: 26px;" title="Your GPS Location">
-          <div style="position: absolute; width: 100%; height: 100%; border-radius: 9999px; background: #0284c7; opacity: 0.32; animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
-          <div style="position: relative; width: 18px; height: 18px; margin: 4px; border-radius: 9999px; background: #0284c7; border: 3px solid #ffffff; box-shadow: 0 2px 8px rgba(0,0,0,0.35);"></div>
-        </div>
-      `,
-      iconSize: [26, 26],
-      iconAnchor: [13, 13],
-    });
-
-    L.marker([userCoords.lat, userCoords.lng], {
-      icon: userIcon,
-      title: 'Your Current Location',
-    }).addTo(layer);
-  }, [userCoords]);
-
-  // Render Accessible Route Polyline when activeRoute updates
-  useEffect(() => {
-    if (!mapInstanceRef.current || !routeLayerRef.current) return;
-    const layer = routeLayerRef.current;
-    layer.clearLayers();
-
-    if (!activeRoute || activeRoute.coordinates.length < 2) return;
-
-    L.polyline(activeRoute.coordinates, {
-      color: '#0f172a',
-      weight: 8,
-      opacity: 0.65,
-      lineCap: 'round',
-      lineJoin: 'round',
-    }).addTo(layer);
-
-    const routeLine = L.polyline(activeRoute.coordinates, {
-      color: '#0ea5e9',
-      weight: 4.5,
-      opacity: 0.98,
-      dashArray: activeRoute.isFallbackArc ? '8, 8' : undefined,
-      lineCap: 'round',
-      lineJoin: 'round',
-    }).addTo(layer);
-
-    mapInstanceRef.current.fitBounds(routeLine.getBounds(), {
-      padding: [90, 90],
-      maxZoom: 16,
-    });
-  }, [activeRoute]);
-
-  useEffect(() => {
-    if (activeRoute && selectedLocation) {
-      handlePreviewRoute(selectedLocation, true);
+      if (showStreetView && streetViewPanoramaRef.current) {
+        streetViewPanoramaRef.current.setPosition({
+          lat: selectedLocation.lat,
+          lng: selectedLocation.lng,
+        });
+      }
+    }
+    if (leafletMapRef.current) {
+      leafletMapRef.current.flyTo(
+        [selectedLocation.lat, selectedLocation.lng],
+        Math.max(leafletMapRef.current.getZoom(), 15),
+        { duration: 0.6 }
+      );
     }
   }, [selectedLocation?.id]);
 
-  // Handle draggable placement pin when adding location
+  // Render Markers (Google Maps + Fallback Interactive Map)
   useEffect(() => {
-    if (!mapInstanceRef.current) return;
-    const map = mapInstanceRef.current;
+    if (googleMapInstanceRef.current && window.google?.maps) {
+      markersRef.current.forEach((m) => m.setMap(null));
+      markersRef.current = [];
 
-    if (isAddingLocation && newPinCoords) {
-      const goldIcon = L.divIcon({
-        className: 'custom-pin-marker',
-        html: `
-          <div style="
-            background: #f59e0b; 
-            color: #ffffff; 
-            width: 44px; 
-            height: 44px; 
-            border-radius: 9999px;
-            display: flex; 
-            align-items: center; 
-            justify-content: center; 
-            border: 3px solid #ffffff;
-            box-shadow: 0 0 0 4px #d97706, 0 8px 16px rgba(0,0,0,0.4);
-          ">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"></path>
-              <circle cx="12" cy="10" r="3"></circle>
-            </svg>
-          </div>
-        `,
-        iconSize: [44, 44],
-        iconAnchor: [22, 22],
-      });
+      const map = googleMapInstanceRef.current;
+      const googleMaps = window.google.maps;
 
-      if (!newPinMarkerRef.current) {
-        const marker = L.marker([newPinCoords.lat, newPinCoords.lng], {
-          icon: goldIcon,
-          draggable: true,
-        }).addTo(map);
+      locations.forEach((loc) => {
+        const isSelected = selectedLocation?.id === loc.id;
+        const colorMeta = getRatingColor(loc.averageRating, loc.totalReviews);
+        const iconSvg = getCategoryIconSvg(loc.category);
+        const markerIconUrl = buildGoogleMarkerSvg(
+          colorMeta.hex,
+          iconSvg,
+          loc.averageRating,
+          isSelected
+        );
 
-        marker.on('dragend', () => {
-          const pos = marker.getLatLng();
-          onNewPinCoordsChange({ lat: pos.lat, lng: pos.lng });
-          announce(`Pin placed at lat ${pos.lat.toFixed(4)}, lng ${pos.lng.toFixed(4)}`);
+        const marker = new googleMaps.Marker({
+          position: { lat: loc.lat, lng: loc.lng },
+          map: map,
+          title: `${loc.name} (${colorMeta.label})`,
+          icon: {
+            url: markerIconUrl,
+            scaledSize: new googleMaps.Size(isSelected ? 50 : 42, isSelected ? 72 : 64),
+            anchor: new googleMaps.Point(isSelected ? 25 : 21, isSelected ? 56 : 50),
+          },
+          zIndex: isSelected ? 1000 : 10,
+          animation: isSelected ? googleMaps.Animation.BOUNCE : null,
         });
 
-        newPinMarkerRef.current = marker;
+        if (isSelected) {
+          setTimeout(() => marker.setAnimation(null), 750);
+        }
+
+        marker.addListener('click', () => {
+          setSelectedUnratedEst(null);
+          onSelectLocation(loc);
+          setShowSummaryCard(true);
+        });
+
+        markersRef.current.push(marker);
+      });
+    }
+
+    // Render Unrated Google Establishments (distinct outlined "Rate" pins, de-duped against rated locations)
+    if (googleMapInstanceRef.current && window.google?.maps) {
+      establishmentMarkersRef.current.forEach((m) => m.setMap(null));
+      establishmentMarkersRef.current = [];
+
+      if (showEstablishments && discoveredEstablishments.length > 0) {
+        const map = googleMapInstanceRef.current;
+        const googleMaps = window.google.maps;
+        const ratedPlaceIds = new Set(locations.map((l) => l.googlePlaceId).filter(Boolean));
+        const ratedNames = new Set(locations.map((l) => l.name.trim().toLowerCase()));
+
+        discoveredEstablishments.forEach((est) => {
+          if (
+            ratedPlaceIds.has(est.googlePlaceId) ||
+            ratedNames.has(est.name.trim().toLowerCase())
+          ) {
+            return;
+          }
+          const isSelected = selectedUnratedEst?.googlePlaceId === est.googlePlaceId;
+          const iconSvg = getCategoryIconSvg(est.category);
+          const markerUrl = buildEstablishmentMarkerSvg(iconSvg, isSelected);
+
+          const marker = new googleMaps.Marker({
+            position: { lat: est.lat, lng: est.lng },
+            map,
+            title: `${est.name} — Click to rate accessibility`,
+            icon: {
+              url: markerUrl,
+              scaledSize: new googleMaps.Size(isSelected ? 46 : 38, isSelected ? 66 : 58),
+              anchor: new googleMaps.Point(isSelected ? 23 : 19, isSelected ? 52 : 46),
+            },
+            zIndex: isSelected ? 950 : 5,
+          });
+
+          marker.addListener('click', () => {
+            setSelectedUnratedEst(est);
+            setShowSummaryCard(true);
+            onSelectGooglePoiRef.current?.(est);
+          });
+
+          establishmentMarkersRef.current.push(marker);
+        });
+      }
+    }
+
+    if (leafletMarkersRef.current && leafletMapRef.current) {
+      leafletMarkersRef.current.clearLayers();
+      locations.forEach((loc) => {
+        const isSelected = selectedLocation?.id === loc.id;
+        const icon = L.divIcon({
+          className: 'custom-a11y-pin',
+          html: buildInteractivePinHtml(loc, isSelected, true),
+          iconSize: [44, 56],
+          iconAnchor: [22, 48],
+        });
+        const m = L.marker([loc.lat, loc.lng], {
+          icon,
+          zIndexOffset: isSelected ? 900 : 10,
+        });
+        m.on('click', () => {
+          onSelectLocation(loc);
+          setShowSummaryCard(true);
+        });
+        m.addTo(leafletMarkersRef.current!);
+      });
+    }
+  }, [locations, selectedLocation, useFallbackInteractiveMap, showEstablishments, discoveredEstablishments, selectedUnratedEst]);
+
+  // Render User Location & Proximity Radius Ring
+  useEffect(() => {
+    const origin = userCoords || (nearbyRadiusKm !== null ? DEFAULT_CDO_CENTER : null);
+
+    if (googleMapInstanceRef.current && window.google?.maps) {
+      const map = googleMapInstanceRef.current;
+      const googleMaps = window.google.maps;
+
+      if (userMarkerRef.current) userMarkerRef.current.setMap(null);
+      if (userCircleRef.current) userCircleRef.current.setMap(null);
+
+      if (origin) {
+        if (nearbyRadiusKm !== null) {
+          userCircleRef.current = new googleMaps.Circle({
+            map,
+            center: { lat: origin.lat, lng: origin.lng },
+            radius: nearbyRadiusKm * 1000,
+            strokeColor: '#0d9488',
+            strokeOpacity: 0.8,
+            strokeWeight: 1.5,
+            fillColor: '#14b8a6',
+            fillOpacity: 0.08,
+          });
+        }
+
+        userMarkerRef.current = new googleMaps.Marker({
+          map,
+          position: { lat: origin.lat, lng: origin.lng },
+          title: userCoords ? 'Your Current Location' : 'Philippine Reference Point',
+          icon: {
+            path: googleMaps.SymbolPath.CIRCLE,
+            scale: 8,
+            fillColor: '#0d9488',
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 3,
+          },
+          zIndex: 999,
+        });
+      }
+    }
+  }, [userCoords, nearbyRadiusKm]);
+
+  // Render Pedestrian Route Polyline
+  useEffect(() => {
+    if (googleMapInstanceRef.current && window.google?.maps) {
+      const map = googleMapInstanceRef.current;
+      const googleMaps = window.google.maps;
+
+      if (routePolylineRef.current) routePolylineRef.current.setMap(null);
+      if (routeCasingRef.current) routeCasingRef.current.setMap(null);
+
+      if (activeRoute && activeRoute.coordinates.length >= 2) {
+        const path = activeRoute.coordinates.map((pt) => ({ lat: pt[0], lng: pt[1] }));
+
+        routeCasingRef.current = new googleMaps.Polyline({
+          map,
+          path,
+          strokeColor: '#0f172a',
+          strokeOpacity: 0.45,
+          strokeWeight: 7,
+        });
+
+        routePolylineRef.current = new googleMaps.Polyline({
+          map,
+          path,
+          strokeColor: '#0284c7',
+          strokeOpacity: 0.95,
+          strokeWeight: 4,
+        });
+
+        const bounds = new googleMaps.LatLngBounds();
+        path.forEach((p) => bounds.extend(p));
+        map.fitBounds(bounds, { top: 70, right: 70, bottom: 70, left: 70 });
+      }
+    }
+
+    if (leafletRouteRef.current && leafletMapRef.current) {
+      leafletRouteRef.current.clearLayers();
+      if (activeRoute && activeRoute.coordinates.length >= 2) {
+        L.polyline(activeRoute.coordinates, {
+          color: '#0f172a',
+          weight: 7,
+          opacity: 0.45,
+        }).addTo(leafletRouteRef.current);
+
+        const poly = L.polyline(activeRoute.coordinates, {
+          color: '#0284c7',
+          weight: 4,
+          opacity: 0.95,
+        }).addTo(leafletRouteRef.current);
+
+        leafletMapRef.current.fitBounds(poly.getBounds(), { padding: [60, 60] });
+      }
+    }
+  }, [activeRoute, useFallbackInteractiveMap]);
+
+  // Draggable pin for "+ Add Location"
+  useEffect(() => {
+    if (!googleMapInstanceRef.current || !window.google?.maps) return;
+
+    const map = googleMapInstanceRef.current;
+    const googleMaps = window.google.maps;
+
+    if (isAddingLocation && newPinCoords) {
+      if (!newPinMarkerRef.current) {
+        newPinMarkerRef.current = new googleMaps.Marker({
+          map,
+          position: { lat: newPinCoords.lat, lng: newPinCoords.lng },
+          draggable: true,
+          title: 'Drag to adjust place coordinates',
+          icon: {
+            path: 'M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z',
+            fillColor: '#0d9488',
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 2,
+            scale: 2,
+            anchor: new googleMaps.Point(12, 24),
+          },
+          zIndex: 1200,
+          animation: googleMaps.Animation.DROP,
+        });
+
+        newPinMarkerRef.current.addListener('dragend', (e: any) => {
+          if (e.latLng) {
+            onNewPinCoordsChange({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+          }
+        });
       } else {
-        newPinMarkerRef.current.setLatLng([newPinCoords.lat, newPinCoords.lng]);
+        newPinMarkerRef.current.setPosition({ lat: newPinCoords.lat, lng: newPinCoords.lng });
       }
-    } else {
-      if (newPinMarkerRef.current) {
-        newPinMarkerRef.current.remove();
-        newPinMarkerRef.current = null;
-      }
+    } else if (newPinMarkerRef.current) {
+      newPinMarkerRef.current.setMap(null);
+      newPinMarkerRef.current = null;
     }
   }, [isAddingLocation, newPinCoords]);
 
+  // Street View Panorama activation
+  useEffect(() => {
+    if (!showStreetView || !streetViewContainerRef.current || !window.google?.maps) return;
+
+    const target = selectedLocation || (locations.length > 0 ? locations[0] : null);
+    if (!target) return;
+
+    const googleMaps = window.google.maps;
+    const panorama = new googleMaps.StreetViewPanorama(streetViewContainerRef.current, {
+      position: { lat: target.lat, lng: target.lng },
+      pov: { heading: 165, pitch: 0 },
+      zoom: 1,
+      addressControl: true,
+      fullscreenControl: false,
+    });
+
+    streetViewPanoramaRef.current = panorama;
+  }, [showStreetView, selectedLocation]);
+
+  // GPS Locate
   const handleLocateMe = () => {
     if (!navigator.geolocation) {
-      handleSimulateCdoLocation();
+      announce('Geolocation is not supported by your browser.');
       return;
     }
 
     setIsLocating(true);
-    announce('Detecting current GPS location...');
-
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         setIsLocating(false);
-        const { latitude, longitude } = pos.coords;
-        setUserCoords({ lat: latitude, lng: longitude });
-
-        if (mapInstanceRef.current) {
-          mapInstanceRef.current.flyTo([latitude, longitude], 15, { duration: 1.2 });
-          announce('Map centered on your current GPS location.');
+        const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        onUserCoordsChange(coords);
+        if (googleMapInstanceRef.current) {
+          googleMapInstanceRef.current.panTo(coords);
+          googleMapInstanceRef.current.setZoom(15);
         }
+        if (leafletMapRef.current) {
+          leafletMapRef.current.flyTo([coords.lat, coords.lng], 15);
+        }
+        announce('Centered on your GPS location.');
       },
       () => {
         setIsLocating(false);
-        handleSimulateCdoLocation();
+        const coords = DEFAULT_CDO_CENTER;
+        onUserCoordsChange(coords);
+        if (googleMapInstanceRef.current) {
+          googleMapInstanceRef.current.panTo(coords);
+          googleMapInstanceRef.current.setZoom(15);
+        }
+        if (leafletMapRef.current) {
+          leafletMapRef.current.flyTo([coords.lat, coords.lng], 15);
+        }
+        announce('Using Cagayan de Oro reference location.');
       },
-      { enableHighAccuracy: true, timeout: 8000 }
+      { timeout: 7000 }
     );
   };
 
-  const handleSimulateCdoLocation = () => {
-    setUserCoords(DEFAULT_CDO_CENTER);
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.flyTo([DEFAULT_CDO_CENTER.lat, DEFAULT_CDO_CENTER.lng], 15, {
-        duration: 1.0,
-      });
+  const handleRecenter = () => {
+    const target = activeCity
+      ? { lat: activeCity.lat, lng: activeCity.lng, zoom: activeCity.zoom }
+      : { lat: DEFAULT_CDO_CENTER.lat, lng: DEFAULT_CDO_CENTER.lng, zoom: 14 };
+
+    if (googleMapInstanceRef.current) {
+      googleMapInstanceRef.current.panTo({ lat: target.lat, lng: target.lng });
+      googleMapInstanceRef.current.setZoom(target.zoom);
     }
-    announce('Using Downtown Cagayan de Oro reference GPS location.');
-  };
-
-  const handlePreviewRoute = async (targetLoc: LocationPin, forceRefresh = false) => {
-    if (activeRoute && !forceRefresh) {
-      setActiveRoute(null);
-      announce('Cleared route preview.');
-      return;
-    }
-
-    const origin = userCoords || DEFAULT_CDO_CENTER;
-    if (!userCoords) {
-      setUserCoords(DEFAULT_CDO_CENTER);
-    }
-
-    setIsRoutingLoading(true);
-    announce(`Calculating accessible route to ${targetLoc.name}...`);
-
-    const routeResult = await fetchAccessibleRoute(
-      origin.lat,
-      origin.lng,
-      targetLoc.lat,
-      targetLoc.lng
-    );
-
-    setIsRoutingLoading(false);
-    setActiveRoute(routeResult);
-    announce(routeResult.summaryText);
-  };
-
-  const handleSelectCityPreset = (preset: CityPreset) => {
-    setActiveCity(preset);
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.flyTo([preset.lat, preset.lng], preset.zoom, { duration: 0.9 });
-      announce(`Viewport moved to ${preset.name}`);
+    if (leafletMapRef.current) {
+      leafletMapRef.current.flyTo([target.lat, target.lng], target.zoom);
     }
   };
 
-  const handleResetCenter = () => {
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.flyTo(MINDANAO_CENTER, DEFAULT_ZOOM, { duration: 0.8 });
-      announce('Map recentered to show Mindanao.');
-    }
-  };
-
-  const handleZoomIn = () => {
-    if (mapInstanceRef.current) mapInstanceRef.current.zoomIn();
-  };
-
-  const handleZoomOut = () => {
-    if (mapInstanceRef.current) mapInstanceRef.current.zoomOut();
-  };
-
-  const activeCardLocation = selectedLocation;
-
-  const currentFilteredIndex = useMemo(() => {
-    if (!activeCardLocation) return 0;
-    const idx = locations.findIndex((l) => l.id === activeCardLocation.id);
-    return idx >= 0 ? idx : 0;
-  }, [activeCardLocation, locations]);
-
-  const handleNavigateRelative = (direction: 'prev' | 'next') => {
-    if (locations.length === 0) return;
-    const nextIdx =
-      direction === 'next'
-        ? (currentFilteredIndex + 1) % locations.length
-        : (currentFilteredIndex - 1 + locations.length) % locations.length;
-    const nextLoc = locations[nextIdx];
-    onSelectLocation(nextLoc);
-    setShowSummaryCard(true);
-    announce(`Viewing ${nextLoc.name} (${nextIdx + 1} of ${locations.length})`);
-  };
-
+  // Top Left: City Badge & Mobile Quick Search/Filter Bar (Mobile-First)
   return (
-    <div className="relative w-full h-full flex flex-col bg-[#e5e5e5] overflow-hidden select-none">
-      {/* Interactive Leaflet container */}
+    <div className="relative w-full h-full flex flex-col bg-slate-100 overflow-hidden select-none">
+      {/* Google Maps Container */}
       <div
         ref={mapContainerRef}
-        className="w-full h-full min-h-[300px]"
+        className={`w-full h-full min-h-[350px] ${useFallbackInteractiveMap ? 'hidden' : 'block'}`}
         tabIndex={0}
-        aria-label={`Interactive OpenStreetMap and Leaflet map of ${activeCity.name}`}
+        aria-label="Google Maps Philippine Interactive Canvas"
       />
 
-      {/* Calm, Minimal Top Map Overlay Bar */}
-      <div className="absolute top-3 left-3 right-3 sm:top-4 sm:left-4 sm:right-4 z-[500] pointer-events-none flex flex-col xl:flex-row xl:items-start justify-between gap-2.5">
-        {/* Top-Left: City Selector & Pin Color Legend */}
-        <div className="order-2 xl:order-1 flex items-center justify-between xl:justify-start gap-2 flex-wrap">
-          <div className="pointer-events-auto bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-2xl shadow-md border border-slate-200/90 flex items-center gap-2.5">
-            <div className="leading-tight">
-              <div className="flex items-center gap-1.5">
-                <select
-                  aria-label="Jump to Mindanao city"
-                  value={activeCity.id}
-                  onChange={(e) => {
-                    const preset = MINDANAO_CITY_PRESETS.find((c) => c.id === e.target.value);
-                    if (preset) handleSelectCityPreset(preset);
-                  }}
-                  className="text-xs sm:text-sm font-black tracking-tight text-slate-900 bg-transparent cursor-pointer focus:outline-none pr-1"
-                >
-                  {MINDANAO_CITY_PRESETS.map((city) => (
-                    <option key={city.id} value={city.id}>
-                      {city.name}
-                    </option>
-                  ))}
-                </select>
-                <span className="text-[10px] font-extrabold px-1.5 py-0.2 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
-                  {locations.length} places
-                </span>
-              </div>
+      {/* Interactive Fallback Map Container */}
+      {useFallbackInteractiveMap && (
+        <div
+          ref={leafletContainerRef}
+          className="w-full h-full min-h-[350px]"
+          tabIndex={0}
+          aria-label="Interactive Accessibility Map Canvas"
+        />
+      )}
 
-              {/* Scannable Pin Color Key */}
-              <div className="flex items-center gap-2 text-[10px] font-bold text-slate-600 mt-0.5">
-                <span className="inline-flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-emerald-600 inline-block" />
-                  4★+ Verified
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" />
-                  Partial
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-rose-600 inline-block" />
-                  Barrier
-                </span>
+      {/* Embedded Google Street View Overlay Panel */}
+      {showStreetView && (
+        <div className="absolute inset-x-4 top-16 bottom-20 z-[600] bg-black rounded-3xl shadow-2xl overflow-hidden border-2 border-slate-700 flex flex-col animate-scale-up">
+          <div className="p-3 bg-slate-900/90 backdrop-blur-md text-white flex items-center justify-between px-4">
+            <div className="flex items-center gap-2">
+              <Eye className="w-4 h-4 text-amber-400" />
+              <span className="text-xs font-bold">
+                Google Street View · 360° Storefront Audit
+              </span>
+              {selectedLocation && (
+                <span className="text-xs text-slate-400">• {selectedLocation.name}</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowStreetView(false)}
+              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-white transition-colors cursor-pointer"
+            >
+              Exit Street View
+            </button>
+          </div>
+          {useFallbackInteractiveMap ? (
+            <div className="flex-1 grid place-items-center p-6 text-center text-slate-300 text-xs">
+              <div className="max-w-sm space-y-2">
+                <p className="font-bold text-white text-sm">360° Street View requires a Google Maps API Key</p>
+                <p>Add <code className="text-emerald-300 font-mono">VITE_GOOGLE_MAPS_API_KEY</code> to your <code className="font-mono">.env</code> file to enable live Google Street View panoramas.</p>
               </div>
             </div>
-          </div>
+          ) : (
+            <div ref={streetViewContainerRef} className="w-full flex-1" />
+          )}
+        </div>
+      )}
 
-          {/* Mobile/Tablet Quick Controls */}
-          <div className="flex xl:hidden items-center gap-1.5 pointer-events-auto">
-            {onOpenHowItWorks && (
-              <button
-                type="button"
-                onClick={onOpenHowItWorks}
-                className="h-9 px-2.5 bg-white/95 backdrop-blur-xs hover:bg-white text-slate-800 rounded-xl shadow-md border border-slate-200/90 flex items-center gap-1 text-[11px] font-bold cursor-pointer"
-                title="How TanAW Works"
-              >
-                <span>? Guide</span>
-              </button>
-            )}
+      {/* Dismissible Google Maps Key Notice Banner */}
+      {!hasApiKey && !dismissKeyNotice && (
+        <div className="hidden md:block absolute top-16 left-4 z-[520] max-w-sm">
+          <div className="p-2.5 bg-white/95 backdrop-blur-md rounded-2xl shadow-lg border border-amber-300 text-xs text-slate-800 flex items-start gap-2.5">
+            <div className="w-7 h-7 rounded-xl bg-amber-100 text-amber-800 grid place-items-center shrink-0">
+              <Key className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-1 font-bold text-slate-900">
+                <span>Mindanao locked + Places enabled</span>
+                <button
+                  type="button"
+                  onClick={() => setDismissKeyNotice(true)}
+                  className="text-slate-400 hover:text-slate-700 p-0.5 cursor-pointer"
+                  aria-label="Dismiss notice"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-600 mt-0.5 leading-snug">
+                Interactive map active. Add <code className="bg-slate-100 px-1 rounded font-mono text-[10px]">VITE_GOOGLE_MAPS_API_KEY</code> in <code className="font-mono text-[10px]">.env</code> with Maps JS + Places API (New) for live establishment discovery.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Google Maps SDK Error Banner */}
+      {googleLoadError && !dismissKeyNotice && (
+        <div className="hidden md:block absolute top-16 left-4 z-[520] max-w-sm">
+          <div className="p-2.5 bg-white/95 backdrop-blur-md rounded-2xl shadow-lg border border-rose-300 text-xs text-slate-800 flex items-start gap-2.5">
+            <div className="w-7 h-7 rounded-xl bg-rose-100 text-rose-700 grid place-items-center shrink-0">
+              <ShieldAlert className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between font-bold text-slate-900">
+                <span>Google Maps Fallback Active</span>
+                <button
+                  type="button"
+                  onClick={() => setDismissKeyNotice(true)}
+                  className="text-slate-400 hover:text-slate-700 p-0.5 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-600 mt-0.5 leading-snug">{googleLoadError}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Non-blocking Places Notice */}
+      {placesNotice && (
+        <div className="absolute top-16 left-4 z-[520] max-w-sm">
+          <div className="p-2.5 bg-white/95 backdrop-blur-md rounded-2xl shadow-lg border border-amber-300 text-xs text-slate-800 flex items-start gap-2">
+            <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <p className="text-[11px] text-slate-700 flex-1">{placesNotice}</p>
             <button
               type="button"
-              onClick={handleLocateMe}
-              disabled={isLocating}
-              className="w-9 h-9 bg-white/95 backdrop-blur-xs hover:bg-white text-slate-800 rounded-xl shadow-md border border-slate-200/90 flex items-center justify-center active:scale-95 cursor-pointer"
-              title="Locate me (GPS)"
-              aria-label="Locate me using GPS"
+              onClick={() => setPlacesNotice(null)}
+              className="text-slate-400 hover:text-slate-700 cursor-pointer"
+              aria-label="Dismiss Places notice"
             >
-              <Locate className={`w-4 h-4 ${isLocating ? 'animate-spin text-sky-600' : 'text-slate-700'}`} />
-            </button>
-            <button
-              type="button"
-              onClick={handleResetCenter}
-              className="w-9 h-9 bg-white/95 backdrop-blur-xs hover:bg-white text-slate-800 rounded-xl shadow-md border border-slate-200/90 flex items-center justify-center active:scale-95 cursor-pointer"
-              title="Reset to Mindanao Overview"
-              aria-label="Reset map view to Mindanao"
-            >
-              <Crosshair className="w-4 h-4 text-slate-700" />
+              <X className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
+      )}
 
-        {/* Center Search Bar: Shown only when PlacesPanel is closed so there is never a duplicate search bar */}
-        <div
-          className={`order-1 xl:order-2 w-full xl:flex-1 xl:max-w-xl mx-auto ${
-            isPlacesPanelOpen ? 'md:hidden' : ''
-          }`}
-        >
-          <MapSearchFilterBar
-            searchQuery={searchQuery}
-            onSearchChange={onSearchChange}
-            selectedCategory={selectedCategory}
-            onCategoryChange={onCategoryChange}
-            onResetFilters={onResetFilters}
-            filteredLocations={locations}
-            totalLocationsCount={totalLocationsCount}
-            onSelectLocationFromSearch={(loc) => {
-              onSelectLocation(loc);
-              setShowSummaryCard(true);
-            }}
-            userCoords={userCoords}
-          />
+      {/* Top Left: Mobile Menu Trigger + City Badge (Mobile + Desktop unified, non-overlapping) */}
+      <div className="absolute top-3 left-3 sm:top-4 sm:left-4 z-[450] flex items-center gap-1.5 select-none max-w-[calc(100%-180px)]">
+        {onOpenMobileMenu && (
+          <button
+            type="button"
+            onClick={onOpenMobileMenu}
+            className="md:hidden w-10 h-10 rounded-2xl bg-white/95 backdrop-blur-md border border-slate-200/90 shadow-sm text-slate-800 hover:bg-slate-50 active:scale-95 transition-all grid place-items-center shrink-0 cursor-pointer"
+            title="Open Accessibility Settings & Menu"
+            aria-label="Open Accessibility Settings & Menu"
+          >
+            <Menu className="w-4 h-4" />
+          </button>
+        )}
+        <div className="inline-flex items-center gap-1.5 sm:gap-2 px-3 py-2 rounded-2xl bg-white/95 backdrop-blur-md border border-slate-200/90 shadow-sm min-w-0">
+          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+          <span className="text-xs font-bold text-slate-800 truncate">{activeCity.name}</span>
+          <span className="text-slate-300">•</span>
+          <span className="text-xs text-slate-600 font-semibold shrink-0">{locations.length}</span>
+          <span className="hidden sm:inline text-slate-300">•</span>
+          <span className="hidden sm:inline text-[10px] font-bold uppercase tracking-wider text-teal-700 bg-teal-50 px-1.5 py-0.2 rounded border border-teal-200/60">
+            Mindanao · Tap any place to rate
+          </span>
         </div>
+      </div>
 
-        {/* Right (Desktop): Minimal Map Controls */}
-        <div className="order-3 hidden xl:flex items-center gap-1.5 pointer-events-auto shrink-0">
-          {/* Layer Switcher */}
+      {/* POI Loading Toast */}
+      {poiLoadingLabel && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[520] px-4 py-2 rounded-full bg-slate-900 text-white text-xs font-bold shadow-lg">
+          {poiLoadingLabel}
+        </div>
+      )}
+
+      {/* Top Center / Below Header: Active Route Banner */}
+      {activeRoute && (
+        <div className="absolute top-14 sm:top-4 left-3 right-3 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-[460] pointer-events-auto">
+          <div className="px-3.5 py-1.5 rounded-full bg-slate-900 text-white text-xs font-medium shadow-lg flex items-center justify-between sm:justify-center gap-2.5 max-w-md mx-auto">
+            <div className="flex items-center gap-2 truncate">
+              <Navigation className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+              <span className="truncate">
+                <b>Step-Free Route: {activeRoute.distanceKm} km</b> (~{activeRoute.durationMinutes} min)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={onClearRoute}
+              className="p-0.5 rounded-full hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
+              title="Clear Route"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Top Right: Controls Pill (Map Style, Street View, Radar, Locate — 40px+ touch targets for mobile accessibility) */}
+      <div className="absolute top-3 right-3 sm:top-4 sm:right-4 z-[450] flex items-center gap-1.5">
+        <div className="flex items-center gap-1 p-1 bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/90 shadow-sm">
+          {/* Map Type Switcher */}
           <div className="relative">
             <button
               type="button"
-              onClick={() => setShowLayerPicker(!showLayerPicker)}
-              className={`h-10 px-3 bg-white/95 backdrop-blur-xs hover:bg-white text-slate-800 rounded-2xl shadow-md border flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer text-xs font-bold ${
-                showLayerPicker ? 'border-sky-500 ring-2 ring-sky-200' : 'border-slate-200/90'
-              }`}
-              title="Switch map style"
-              aria-label="Switch map style"
               aria-expanded={showLayerPicker}
+              onClick={() => {
+                setShowLayerPicker(!showLayerPicker);
+                setShowRadiusPicker(false);
+              }}
+              className={`w-9 h-9 rounded-xl grid place-items-center text-slate-700 hover:bg-slate-100 active:scale-95 transition-all cursor-pointer ${
+                showLayerPicker ? 'bg-teal-50 text-teal-800 font-bold' : ''
+              }`}
+              title="Map Styles (Roadmap, Satellite, Terrain)"
+              aria-label="Map Styles"
             >
-              <Layers className="w-4 h-4 text-sky-600" />
-              <span>{TILE_CONFIGS[mapStyle].label}</span>
+              <Layers className="w-4 h-4" />
             </button>
 
             {showLayerPicker && (
-              <div className="absolute top-12 right-0 w-60 bg-white rounded-2xl shadow-2xl border border-slate-200 p-2 space-y-1 z-[600] animate-scale-up">
-                {(Object.keys(TILE_CONFIGS) as MapTileStyle[]).map((key) => {
-                  const config = TILE_CONFIGS[key];
-                  const isActive = mapStyle === key;
+              <div className="absolute top-11 right-0 w-52 bg-white rounded-xl shadow-xl border border-slate-200 p-1.5 z-[600] space-y-0.5 animate-scale-up">
+                <span className="block px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Google Map Type
+                </span>
+                {GOOGLE_MAP_STYLES.map((style) => {
+                  const isActive = mapStyle === style.id;
                   return (
                     <button
-                      key={key}
+                      key={style.id}
                       type="button"
                       onClick={() => {
-                        setMapStyle(key);
+                        setMapStyle(style.id);
                         setShowLayerPicker(false);
-                        announce(`Map layer changed to ${config.name}`);
                       }}
-                      className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between text-left transition-colors cursor-pointer ${
+                      className={`w-full px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between text-left transition-colors cursor-pointer ${
                         isActive
-                          ? 'bg-sky-50 text-sky-800 font-bold'
+                          ? 'bg-teal-50 text-teal-900 font-semibold'
                           : 'text-slate-700 hover:bg-slate-50'
                       }`}
                     >
-                      <span>{config.name}</span>
-                      {isActive && <Check className="w-4 h-4 text-sky-600 shrink-0" />}
+                      <div>
+                        <div className="font-semibold text-slate-900">{style.label}</div>
+                        <div className="text-[10px] text-slate-500">{style.desc}</div>
+                      </div>
+                      {isActive && <Check className="w-3.5 h-3.5 text-teal-600 shrink-0 ml-1" />}
                     </button>
                   );
                 })}
+
+                <div className="my-1 h-px bg-slate-200" />
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={showEstablishments}
+                  onClick={() => setShowEstablishments(!showEstablishments)}
+                  className={`w-full px-2.5 py-2 rounded-lg text-xs font-bold flex items-center justify-between text-left transition-colors cursor-pointer ${
+                    showEstablishments
+                      ? 'bg-sky-50 text-sky-900'
+                      : 'text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  <div>
+                    <div>Establishments</div>
+                    <div className="text-[10px] font-normal text-slate-500">
+                      Highlight Mindanao places to rate
+                    </div>
+                  </div>
+                  <span
+                    className={`w-8 h-4.5 rounded-full p-0.5 transition-colors flex items-center ${
+                      showEstablishments ? 'bg-sky-600 justify-end' : 'bg-slate-300 justify-start'
+                    }`}
+                  >
+                    <span className="w-3.5 h-3.5 rounded-full bg-white shadow-xs" />
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Google Street View Toggle Button */}
+          <button
+            type="button"
+            onClick={() => setShowStreetView(!showStreetView)}
+            className={`p-2 rounded-lg transition-colors cursor-pointer ${
+              showStreetView ? 'bg-amber-100 text-amber-900' : 'text-slate-700 hover:bg-slate-100'
+            }`}
+            title="Google Street View (360° Entrance Audit)"
+            aria-label="Toggle Google Street View"
+          >
+            <Eye className="w-4 h-4" />
+          </button>
+
+          {/* Proximity Radar */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => {
+                setShowRadiusPicker(!showRadiusPicker);
+                setShowLayerPicker(false);
+              }}
+              className={`p-2 rounded-lg transition-colors cursor-pointer ${
+                nearbyRadiusKm !== null
+                  ? 'bg-teal-600 text-white'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+              title="Filter nearby places by radius"
+              aria-label="Filter nearby places by radius"
+            >
+              <Radar className="w-4 h-4" />
+            </button>
+
+            {showRadiusPicker && (
+              <div className="absolute top-11 right-0 w-44 bg-white rounded-xl shadow-xl border border-slate-200 p-1.5 z-[600] space-y-0.5 animate-scale-up">
+                <span className="block px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Nearby Radius
+                </span>
+                {[
+                  { label: 'Off (All distances)', val: null },
+                  { label: 'Within 3 km', val: 3 },
+                  { label: 'Within 5 km', val: 5 },
+                  { label: 'Within 10 km', val: 10 },
+                  { label: 'Within 25 km', val: 25 },
+                ].map((opt) => (
+                  <button
+                    key={String(opt.val)}
+                    type="button"
+                    onClick={() => {
+                      onNearbyRadiusChange(opt.val);
+                      setShowRadiusPicker(false);
+                    }}
+                    className={`w-full px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between text-left transition-colors cursor-pointer ${
+                      nearbyRadiusKm === opt.val
+                        ? 'bg-teal-50 text-teal-900 font-semibold'
+                        : 'text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span>{opt.label}</span>
+                    {nearbyRadiusKm === opt.val && <Check className="w-3.5 h-3.5 text-teal-600" />}
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -672,72 +1050,118 @@ export const MapView: React.FC<MapViewProps> = ({
           <button
             type="button"
             onClick={handleLocateMe}
-            disabled={isLocating}
-            className="w-10 h-10 bg-white/95 backdrop-blur-xs hover:bg-white text-slate-800 rounded-2xl shadow-md border border-slate-200/90 flex items-center justify-center transition-all active:scale-95 cursor-pointer"
-            title="Locate me (GPS)"
-            aria-label="Locate me using GPS"
+            className="p-2 rounded-lg text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+            title="Locate my position (GPS)"
+            aria-label="Locate my position"
           >
-            <Locate className={`w-4 h-4 ${isLocating ? 'animate-spin text-sky-600' : 'text-slate-700'}`} />
+            <Locate className={`w-4 h-4 ${isLocating ? 'animate-spin text-teal-600' : ''}`} />
           </button>
-
-          {/* Mindanao Center Reset */}
-          <button
-            type="button"
-            onClick={handleResetCenter}
-            className="w-10 h-10 bg-white/95 backdrop-blur-xs hover:bg-white text-slate-800 rounded-2xl shadow-md border border-slate-200/90 flex items-center justify-center transition-all active:scale-95 cursor-pointer"
-            title="Reset to Mindanao Overview"
-            aria-label="Reset map view to Mindanao"
-          >
-            <Crosshair className="w-4 h-4 text-slate-700" />
-          </button>
-
-          {/* Zoom controls */}
-          <div className="flex items-center bg-white/95 backdrop-blur-xs rounded-2xl shadow-md border border-slate-200/90 overflow-hidden">
-            <button
-              type="button"
-              onClick={handleZoomIn}
-              className="w-10 h-10 hover:bg-slate-50 text-slate-800 flex items-center justify-center border-r border-slate-200/80 transition-colors cursor-pointer"
-              title="Zoom in"
-              aria-label="Zoom in"
-            >
-              <ZoomIn className="w-4 h-4 text-slate-700" />
-            </button>
-            <button
-              type="button"
-              onClick={handleZoomOut}
-              className="w-10 h-10 hover:bg-slate-50 text-slate-800 flex items-center justify-center transition-colors cursor-pointer"
-              title="Zoom out"
-              aria-label="Zoom out"
-            >
-              <ZoomOut className="w-4 h-4 text-slate-700" />
-            </button>
-          </div>
         </div>
       </div>
 
-      {/* Adding pin guide banner */}
-      {isAddingLocation && (
-        <div className="absolute top-36 sm:top-28 left-4 right-4 sm:left-6 sm:right-auto max-w-md z-[500] bg-amber-500 text-amber-950 px-4 py-2.5 rounded-2xl shadow-xl border border-amber-600 flex items-center gap-3 animate-fade-in">
-          <MapPin className="w-5 h-5 shrink-0 text-amber-950 animate-bounce" />
-          <p className="text-xs sm:text-sm font-bold">
-            Tap anywhere on the map or drag the gold marker to place your new pin.
-          </p>
-        </div>
-      )}
+      {/* Right: Zoom & Recenter Controls */}
+      <div className="absolute top-16 sm:top-20 right-3 sm:right-4 z-[440] flex flex-col gap-1 p-1 bg-white/95 backdrop-blur-md rounded-xl border border-slate-200/80 shadow-xs">
+        <button
+          type="button"
+          onClick={() => {
+            if (googleMapInstanceRef.current) {
+              googleMapInstanceRef.current.setZoom(googleMapInstanceRef.current.getZoom() + 1);
+            }
+            if (leafletMapRef.current) {
+              leafletMapRef.current.zoomIn();
+            }
+          }}
+          className="p-2 rounded-lg text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+          title="Zoom in"
+          aria-label="Zoom in"
+        >
+          <ZoomIn className="w-4 h-4" />
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (googleMapInstanceRef.current) {
+              googleMapInstanceRef.current.setZoom(googleMapInstanceRef.current.getZoom() - 1);
+            }
+            if (leafletMapRef.current) {
+              leafletMapRef.current.zoomOut();
+            }
+          }}
+          className="p-2 rounded-lg text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+          title="Zoom out"
+          aria-label="Zoom out"
+        >
+          <ZoomOut className="w-4 h-4" />
+        </button>
+        <div className="w-full h-px bg-slate-200 my-0.5" />
+        <button
+          type="button"
+          onClick={handleRecenter}
+          className="p-2 rounded-lg text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+          title="Recenter to active region"
+          aria-label="Recenter to active region"
+        >
+          <Crosshair className="w-4 h-4" />
+        </button>
+      </div>
 
-      {/* Floating Bottom Details Card */}
-      {showSummaryCard && activeCardLocation && !isAddingLocation && (
+      {/* Compact Legend & Powered by Google Attribution */}
+      <div className="hidden md:flex absolute bottom-3 left-3 z-[430] items-center gap-2.5 px-3 py-1.5 rounded-full bg-white/95 backdrop-blur-md border border-slate-200/90 shadow-xs text-[10px] font-semibold text-slate-600">
+        <span className="inline-flex items-center gap-1">
+          <span className="w-2.5 h-2.5 rounded-full bg-emerald-600" />
+          4★+ Accessible
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+          Partial
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-2.5 h-2.5 rounded-full bg-rose-600" />
+          Barrier
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="w-2.5 h-2.5 rounded-full bg-white border-2 border-sky-600" />
+          Unrated (Tap to Rate)
+        </span>
+        <span className="text-slate-300">|</span>
+        <span className="text-slate-500 font-bold">Powered by Google</span>
+      </div>
+
+      {/* Floating Card at Bottom (Mobile & Desktop — Rated Pin or Unrated Google Establishment) */}
+      {showSummaryCard && (selectedLocation || selectedUnratedEst) && (
         <MapFloatingCard
-          location={activeCardLocation}
+          location={
+            selectedLocation ||
+            (selectedUnratedEst
+              ? {
+                  id: `google-${selectedUnratedEst.googlePlaceId}`,
+                  googlePlaceId: selectedUnratedEst.googlePlaceId,
+                  source: 'google',
+                  name: selectedUnratedEst.name,
+                  category: selectedUnratedEst.category,
+                  address: selectedUnratedEst.address,
+                  lat: selectedUnratedEst.lat,
+                  lng: selectedUnratedEst.lng,
+                  averageRating: 0,
+                  totalReviews: 0,
+                  tags: [],
+                  photos: [],
+                  reviews: [],
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                }
+              : null)
+          }
           onOpenDetails={onOpenDetails}
-          onClose={() => setShowSummaryCard(false)}
+          onRatePlace={onRatePlace}
+          onClose={() => {
+            setShowSummaryCard(false);
+            setSelectedUnratedEst(null);
+          }}
           userCoords={userCoords}
           activeRoute={activeRoute}
           isRoutingLoading={isRoutingLoading}
-          onToggleRoutePreview={(loc) => handlePreviewRoute(loc)}
-          onNavigateRelative={handleNavigateRelative}
-          currentIndex={currentFilteredIndex}
-          totalFilteredCount={locations.length}
+          onToggleRoutePreview={onToggleRoutePreview}
         />
       )}
     </div>

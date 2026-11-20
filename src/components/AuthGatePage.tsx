@@ -124,8 +124,12 @@ export const AuthGatePage: React.FC<AuthGatePageProps> = ({ onAuthenticated }) =
         {/* Top Brand Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5 font-extrabold text-xl tracking-tight text-[#0F172A]">
-            <div className="w-9 h-9 rounded-xl bg-[#21524B] text-white grid place-items-center border-2 border-[#0F172A] shadow-[0_2px_0_#0F172A]">
-              <MapPin className="w-4 h-4" />
+            <div className="w-9 h-9 rounded-xl bg-[#0F172A] text-white grid place-items-center border-2 border-[#0F172A] shadow-[0_2px_0_#0F172A] p-1.5">
+              <img
+                src="/logo-green.png?v=2"
+                alt="TanAW Official Logo"
+                className="w-full h-full object-contain"
+              />
             </div>
             <span>
               TanAW<span className="text-[#21524B]">.</span>
@@ -255,9 +259,10 @@ export const AuthGatePage: React.FC<AuthGatePageProps> = ({ onAuthenticated }) =
                       onChange={(e) => setRole(e.target.value as AuthUser['role'])}
                       className="w-full bg-transparent text-sm font-semibold text-[#0F172A] focus:outline-none cursor-pointer"
                     >
-                      <option value="PWD Member / Advocate">PWD Member / Advocate</option>
-                      <option value="Caregiver / Family">Caregiver / Family Member</option>
+                      <option value="PWD Member / Advocate">PWD Member / Advocate (2× Vote Weight)</option>
+                      <option value="Caregiver / Family">Caregiver / Family Member (2× Vote Weight)</option>
                       <option value="Community Mapper">Community Accessibility Mapper</option>
+                      <option value="Business Owner">Business / Establishment Owner</option>
                     </select>
                   </div>
                 </div>

@@ -4,20 +4,21 @@ import { LocationPin, CategoryType } from '../types/accessibility';
  * accessibility has not been assessed and each starts unrated. */
 const venues: Array<{
   id: string;
+  googlePlaceId?: string;
   name: string;
   category: CategoryType;
   address: string;
   lat: number;
   lng: number;
 }> = [
-  { id: 'dvo-sm-lanang', name: 'SM Lanang', category: 'Shopping', address: 'J.P. Laurel Avenue, Lanang, Davao City', lat: 7.0988, lng: 125.6311 },
-  { id: 'dvo-sm-ecoland', name: 'SM City Davao (Ecoland)', category: 'Shopping', address: 'Quimpo Boulevard, Matina, Davao City', lat: 7.0492, lng: 125.5883 },
-  { id: 'dvo-peoples-park', name: "People's Park", category: 'Public Space', address: 'Palma Gil Street, Davao City', lat: 7.0684, lng: 125.6087 },
-  { id: 'dvo-ddh', name: 'Davao Doctors Hospital', category: 'Healthcare', address: '118 E. Quirino Avenue, Davao City', lat: 7.0669, lng: 125.6098 },
-  { id: 'dvo-spmc', name: 'Southern Philippines Medical Center', category: 'Healthcare', address: 'J.P. Laurel Avenue, Davao City', lat: 7.0992, lng: 125.6128 },
+  { id: 'dvo-sm-lanang', googlePlaceId: 'ChIJ50c3H6R1-TIRvK5f6y9Y6i8', name: 'SM Lanang', category: 'Shopping', address: 'J.P. Laurel Avenue, Lanang, Davao City', lat: 7.0988, lng: 125.6311 },
+  { id: 'dvo-sm-ecoland', googlePlaceId: 'ChIJT5M53rxs-TIR5jN-9g7c9d4', name: 'SM City Davao (Ecoland)', category: 'Shopping', address: 'Quimpo Boulevard, Matina, Davao City', lat: 7.0492, lng: 125.5883 },
+  { id: 'dvo-peoples-park', googlePlaceId: 'ChIJW8m07M1s-TIR2p5q7s9w2g0', name: "People's Park", category: 'Public Space', address: 'Palma Gil Street, Davao City', lat: 7.0684, lng: 125.6087 },
+  { id: 'dvo-ddh', googlePlaceId: 'ChIJK7v24M5s-TIR8n9r6t1y3h2', name: 'Davao Doctors Hospital', category: 'Healthcare', address: '118 E. Quirino Avenue, Davao City', lat: 7.0669, lng: 125.6098 },
+  { id: 'dvo-spmc', googlePlaceId: 'ChIJQ4n82K51-TIR6m3p1v5z9j4', name: 'Southern Philippines Medical Center', category: 'Healthcare', address: 'J.P. Laurel Avenue, Davao City', lat: 7.0992, lng: 125.6128 },
   { id: 'dvo-magsaysay-park', name: 'Magsaysay Park', category: 'Public Space', address: 'Magsaysay Avenue, Davao City', lat: 7.0720, lng: 125.6170 },
   { id: 'dvo-lachi', name: "Lachi's Sans Rival Atbp.", category: 'Dining & Cafe', address: 'F. Torres Street, Davao City', lat: 7.0740, lng: 125.6120 },
-  { id: 'gensan-sm', name: 'SM City General Santos', category: 'Shopping', address: 'Santiago Boulevard, General Santos City', lat: 6.1127, lng: 125.1748 },
+  { id: 'gensan-sm', googlePlaceId: 'ChIJ2b6c8d9e-DIR4k7l2m3n5p6', name: 'SM City General Santos', category: 'Shopping', address: 'Santiago Boulevard, General Santos City', lat: 6.1127, lng: 125.1748 },
   { id: 'gensan-kcc', name: 'KCC Mall of GenSan', category: 'Shopping', address: 'J. Catolico Avenue, General Santos City', lat: 6.1210, lng: 125.1740 },
   { id: 'gensan-queen-tuna', name: 'Queen Tuna Park', category: 'Public Space', address: 'Jose Catolico Sr. Avenue, General Santos City', lat: 6.1086, lng: 125.1718 },
   { id: 'gensan-dadiangas-medical', name: 'Dadiangas Medical Center', category: 'Healthcare', address: 'National Highway, General Santos City', lat: 6.1120, lng: 125.1750 },
@@ -40,6 +41,7 @@ const venues: Array<{
 
 export const MINDANAO_LOCATIONS: LocationPin[] = venues.map((venue) => ({
   ...venue,
+  source: venue.googlePlaceId ? 'google' : 'custom',
   averageRating: 0,
   totalReviews: 0,
   tags: [],

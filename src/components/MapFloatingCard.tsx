@@ -22,11 +22,13 @@ import {
   AlertTriangle,
   Sparkles,
   Clock,
+  Star,
 } from 'lucide-react';
 
 interface MapFloatingCardProps {
   location: LocationPin | null;
   onOpenDetails: (loc: LocationPin) => void;
+  onRatePlace?: (loc: LocationPin) => void;
   onClose: () => void;
   userCoords: { lat: number; lng: number } | null;
   activeRoute?: RoutePreviewResult | null;
@@ -40,6 +42,7 @@ interface MapFloatingCardProps {
 export const MapFloatingCard: React.FC<MapFloatingCardProps> = ({
   location,
   onOpenDetails,
+  onRatePlace,
   onClose,
   userCoords,
   activeRoute = null,
@@ -133,7 +136,7 @@ export const MapFloatingCard: React.FC<MapFloatingCardProps> = ({
             </div>
 
             <p className="text-xs text-slate-500 truncate mt-0.5">
-              {location.category} • {districtOrCity} • {activeRoute ? `${activeRoute.distanceKm} km route` : `${distanceKm} km`}
+              {location.category} • {location.address || districtOrCity} • {activeRoute ? `${activeRoute.distanceKm} km route` : `${distanceKm} km`}
             </p>
           </div>
         </div>
@@ -241,12 +244,23 @@ export const MapFloatingCard: React.FC<MapFloatingCardProps> = ({
             </button>
           )}
 
+          {onRatePlace && (
+            <button
+              type="button"
+              onClick={() => onRatePlace(location)}
+              className="min-h-[38px] px-4 py-1.5 rounded-full bg-teal-700 hover:bg-teal-800 text-white font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+            >
+              <Star className="w-3.5 h-3.5 fill-amber-300 text-amber-300" />
+              <span>Rate this place</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => onOpenDetails(location)}
-            className="min-h-[38px] px-4 py-1.5 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+            className="min-h-[38px] px-3.5 py-1.5 rounded-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
           >
-            <span>Reviews & Vote</span>
+            <span>Details</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>

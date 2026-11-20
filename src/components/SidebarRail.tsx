@@ -20,6 +20,7 @@ import {
   LogOut,
   Users,
   User,
+  Globe,
 } from 'lucide-react';
 
 export type AppViewMode = 'map' | 'community' | 'profile';
@@ -103,12 +104,16 @@ export const SidebarRail: React.FC<SidebarRailProps> = ({
           <button
             type="button"
             onClick={() => onCloseMobile?.()}
-            className="flex items-center gap-2.5 font-extrabold text-lg tracking-tight text-slate-900 text-left cursor-pointer"
+            className="flex items-center gap-2.5 font-extrabold text-lg tracking-tight text-slate-900 text-left cursor-pointer group"
             title="TanAW CDO"
             aria-label="TanAW Home"
           >
-            <div className="w-9 h-9 rounded-xl bg-emerald-800 text-white grid place-items-center shadow-xs shrink-0">
-              <MapPin className="w-4 h-4" />
+            <div className="w-9 h-9 rounded-xl bg-[#0F172A] text-white grid place-items-center border-[1.5px] border-[#0F172A] shadow-[0_2px_0_#0F172A] shrink-0 p-1.5 group-hover:scale-105 transition-transform">
+              <img
+                src="/logo-green.png?v=2"
+                alt="TanAW Official Logo"
+                className="w-full h-full object-contain"
+              />
             </div>
             {showLabels && <span className="whitespace-nowrap">TanAW</span>}
           </button>
@@ -318,6 +323,18 @@ export const SidebarRail: React.FC<SidebarRailProps> = ({
               {showLabels && <span>How It Works</span>}
             </button>
           )}
+
+          {/* Landing Page Link */}
+          <a
+            href="index.html"
+            className={`flex items-center gap-3 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 whitespace-nowrap cursor-pointer transition-all ${
+              !showLabels ? 'justify-center p-2.5' : 'px-3 py-2.5'
+            }`}
+            title="Public Landing Page"
+          >
+            <Globe className="w-4 h-4 shrink-0 text-teal-600" />
+            {showLabels && <span>Landing Page</span>}
+          </a>
         </div>
 
         {/* Share + Signed-in User Account Footer */}

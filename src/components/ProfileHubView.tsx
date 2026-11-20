@@ -15,6 +15,12 @@ import {
   getUserBadges,
 } from '../utils/storage';
 import {
+  getRolePermissions,
+  getVoteWeight,
+  resolveRbacRole,
+  ROLE_META,
+} from '../utils/rbac';
+import {
   User,
   Bookmark,
   History,
@@ -324,9 +330,46 @@ export const ProfileHubView: React.FC<ProfileHubViewProps> = ({
                   <option value="PWD Member / Advocate">PWD Member / Advocate</option>
                   <option value="Caregiver / Family">Caregiver / Family</option>
                   <option value="Community Mapper">Community Mapper</option>
+                  <option value="Business Owner">Business Owner</option>
+                  {currentUser.role === 'Moderator' && (
+                    <option value="Moderator">Moderator</option>
+                  )}
+                  {currentUser.role === 'Admin' && (
+                    <option value="Admin">Admin</option>
+                  )}
                 </select>
               </div>
             </div>
+
+            {/* RBAC Role & Active Permissions Summary */}
+            {(() => {
+              const rbacRole = resolveRbacRole(currentUser);
+              const meta = ROLE_META[rbacRole];
+              const perms = getRolePermissions(currentUser);
+              return (
+                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-900">
+                      RBAC Access Level &amp; Permissions
+                    </span>
+                    <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${meta.badgeClass}`}>
+                      {meta.label} · {getVoteWeight(currentUser)}× Vote Weight
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600">{meta.summary}</p>
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {perms.map((p) => (
+                      <span
+                        key={p}
+                        className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-[10px] font-mono font-semibold text-slate-700"
+                      >
+                        {p}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
 
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1.5">

@@ -4,6 +4,7 @@
  */
 
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import * as admin from 'firebase-admin';
 import { GoogleGenAI } from '@google/genai';
 
@@ -107,6 +108,107 @@ export const analyzeStorefront = onCall(
     } catch (err: any) {
       console.error('Storefront analysis execution error:', err);
       throw new HttpsError('internal', err.message || 'AI processing failed');
+    }
+  }
+);
+
+const SERVER_TOXICITY_PATTERNS = [
+  /\b(idiot|stupid|scammer|trash|garbage|ugly|loser|moron|bobo|tanga|gago|puta|ulol)\b/i,
+  /\b(boycott|destroy this place|shut them down|burn it|fire the staff)\b/i,
+  /(.)\1{7,}/i,
+];
+
+/**
+ * Pillar 3: Server-side Anti-Brigading Circuit Breaker, Probationary Queue,
+ * and Automated Toxicity & Defamation Filter triggered on new review creation.
+ */
+export const moderateNewReview = onDocumentCreated(
+  'locations/{locationId}/reviews/{reviewId}',
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+
+    const review = snap.data();
+    const { locationId, reviewId } = event.params;
+    const db = admin.firestore();
+    const comment = String(review.comment || '');
+    const isNegative = Boolean(review.isNegativeReport) || Number(review.rating || 5) <= 2;
+
+    // 1. Automated Toxicity & Defamation Filter
+    const isToxic = SERVER_TOXICITY_PATTERNS.some((re) => re.test(comment));
+    if (isToxic) {
+      await snap.ref.update({
+        status: 'removed',
+        statusReason: 'Blocked automatically by toxicity & defamation filter.',
+      });
+      await db.collection('moderationQueue').add({
+        locationId,
+        reviewId,
+        reason: 'toxicity_filter',
+        status: 'open',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return;
+    }
+
+    // 2. Mandatory photo evidence check for negative reports
+    const photos = Array.isArray(review.photos) ? review.photos : [];
+    if (isNegative && photos.length === 0) {
+      await snap.ref.update({
+        status: 'pending_review',
+        statusReason: 'Negative report missing required photo evidence.',
+      });
+      return;
+    }
+
+    // 3. Review-Bombing Circuit Breaker: 3+ negative reports within 2-hour window
+    if (isNegative) {
+      const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+      const recentSnap = await db
+        .collection('locations')
+        .doc(locationId)
+        .collection('reviews')
+        .where('createdAtMs', '>=', twoHoursAgo)
+        .get();
+
+      const recentNegatives = recentSnap.docs.filter((d) => {
+        const data = d.data();
+        return Boolean(data.isNegativeReport) || Number(data.rating || 5) <= 2;
+      });
+
+      if (recentNegatives.length >= 3) {
+        await db.collection('locations').doc(locationId).set(
+          { brigadeFrozen: true },
+          { merge: true }
+        );
+        await snap.ref.update({
+          status: 'pending_review',
+          statusReason: 'Review-bombing circuit breaker triggered (3+ negative reports in 2 hours).',
+        });
+        await db.collection('moderationQueue').add({
+          locationId,
+          reviewId,
+          reason: 'brigade_circuit_breaker',
+          status: 'open',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return;
+      }
+    }
+
+    // 4. Probationary Queue for new accounts on negative reports
+    if (isNegative && review.authorTrustLevel === 'probationary') {
+      await snap.ref.update({
+        status: 'pending_review',
+        statusReason: 'Probationary account negative report routed to moderation queue.',
+      });
+      await db.collection('moderationQueue').add({
+        locationId,
+        reviewId,
+        reason: 'probationary_negative',
+        status: 'open',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
     }
   }
 );

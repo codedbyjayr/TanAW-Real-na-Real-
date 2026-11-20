@@ -1,9 +1,303 @@
 rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model (TanAW RBAC)
+// ===============================================================
+//
+// Collection: users
+// Document ID: {userId} (matches Firebase Auth UID)
+// Fields:
+//   - uid: string (required, immutable, matches auth.uid)
+//   - name: string (required, 1..80 chars)
+//   - email: string (required, valid email, private PII - owner/admin read only)
+//   - role: string (required, enum: 'contributor' | 'pwd_advocate' | 'business_owner' | 'moderator' | 'admin')
+//   - enforcement: string (required, enum: 'active' | 'warned' | 'suspended' | 'banned', immutable by non-admins)
+//   - createdAt: string (required, immutable ISO timestamp)
+//
+// Collection: locations
+// Document ID: {locationId}
+// Fields:
+//   - id: string (required, 1..100 chars)
+//   - name: string (required, 1..150 chars)
+//   - category: string (required, 1..60 chars)
+//   - address: string (required, 1..250 chars)
+//   - lat: number (required, -90..90)
+//   - lng: number (required, -180..180)
+//   - averageRating: number (required, 0..5)
+//   - totalReviews: number (required, >= 0)
+//   - description: string (optional, <= 1000 chars)
+//   - aiSummary: string (optional, <= 1000 chars)
+//   - aiBarriers: list (optional, <= 20 items)
+//   - photos: list (optional, <= 20 items)
+//   - reviews: list (optional, <= 200 items)
+//   - tags: list (optional, <= 30 items)
+//   - brigadeFrozen: bool (optional, modifiable only by moderator/admin)
+//   - claimedOwner: map (optional, modifiable only by business_owner/admin)
+//   - createdAt: string (required, immutable)
+//   - updatedAt: string (required)
+//
+// Collection: locations/{locationId}/reviews
+// Document ID: {reviewId}
+// Fields:
+//   - authorId: string (required, immutable, matches auth.uid)
+//   - authorName: string (required, 1..80 chars)
+//   - rating: number (required, 1..5)
+//   - comment: string (required, <= 1000 chars)
+//   - status: string (required, enum: 'published' | 'pending_review' | 'under_review' | 'removed')
+//   - createdAtMs: number (required, immutable)
+//
+// Collection: moderationQueue
+// Document ID: {itemId}
+// Fields:
+//   - locationId: string (required, 1..100 chars)
+//   - reviewId: string (required, 1..100 chars)
+//   - reportedBy: string (required, matches auth.uid on create)
+//   - reason: string (required, 1..80 chars)
+//   - explanation: string (optional, <= 500 chars)
+//   - status: string (required, enum: 'open' | 'approved' | 'removed' | 'appealed')
+//   - createdAt: timestamp (required, immutable)
+//
+// ===============================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // shortcut: open for initial prototyping, add auth checks before production launch
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return isAuthenticated()
+        ? (('role' in request.auth.token)
+            ? request.auth.token.role
+            : (exists(/databases/$(database)/documents/users/$(request.auth.uid))
+                ? getUserDoc().role
+                : 'contributor'))
+        : 'guest';
+    }
+
+    function isNotBanned() {
+      return isAuthenticated() &&
+        (!exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+         !(getUserDoc().enforcement in ['suspended', 'banned']));
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    function isModerator() {
+      return isAuthenticated() && getUserRole() in ['moderator', 'admin'];
+    }
+
+    function isBusinessOwner() {
+      return isAuthenticated() && getUserRole() in ['business_owner', 'admin'];
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.size() <= 120 &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidList(listVal, maxSize) {
+      return listVal is list && listVal.size() <= maxSize;
+    }
+
+    // ===============================================================
+    // Domain Validators (Used on BOTH create and update)
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'name', 'email', 'role', 'enforcement', 'createdAt']) &&
+        hasOnlyAllowedFields(['uid', 'name', 'email', 'role', 'enforcement', 'bio', 'createdAt']) &&
+        data.uid is string && data.uid.size() > 0 && data.uid.size() <= 128 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        isValidEmail(data.email) &&
+        data.role in ['contributor', 'pwd_advocate', 'business_owner', 'moderator', 'admin'] &&
+        data.enforcement in ['active', 'warned', 'suspended', 'banned'] &&
+        data.createdAt is string && data.createdAt.size() <= 40 &&
+        (!('bio' in data) || (data.bio is string && data.bio.size() <= 300));
+    }
+
+    function isValidLocation(data) {
+      return hasRequiredFields(['id', 'name', 'category', 'address', 'lat', 'lng', 'averageRating', 'totalReviews', 'createdAt', 'updatedAt']) &&
+        hasOnlyAllowedFields([
+          'id', 'name', 'category', 'address', 'lat', 'lng',
+          'averageRating', 'totalReviews', 'description', 'aiSummary',
+          'aiBarriers', 'photos', 'reviews', 'tags', 'brigadeFrozen',
+          'claimedOwner', 'createdAt', 'updatedAt'
+        ]) &&
+        validStringLength('id', 1, 100) &&
+        validStringLength('name', 1, 150) &&
+        validStringLength('category', 1, 60) &&
+        validStringLength('address', 1, 250) &&
+        data.lat is number && data.lat >= -90 && data.lat <= 90 &&
+        data.lng is number && data.lng >= -180 && data.lng <= 180 &&
+        data.averageRating is number && data.averageRating >= 0 && data.averageRating <= 5 &&
+        data.totalReviews is number && data.totalReviews >= 0 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1000)) &&
+        (!('aiSummary' in data) || (data.aiSummary is string && data.aiSummary.size() <= 1000)) &&
+        (!('aiBarriers' in data) || isValidList(data.aiBarriers, 20)) &&
+        (!('photos' in data) || isValidList(data.photos, 20)) &&
+        (!('reviews' in data) || isValidList(data.reviews, 200)) &&
+        (!('tags' in data) || isValidList(data.tags, 30)) &&
+        (!('brigadeFrozen' in data) || data.brigadeFrozen is bool) &&
+        data.createdAt is string && data.createdAt.size() <= 40 &&
+        data.updatedAt is string && data.updatedAt.size() <= 40;
+    }
+
+    function isValidReview(data) {
+      return hasRequiredFields(['authorId', 'authorName', 'rating', 'comment', 'status', 'createdAtMs']) &&
+        hasOnlyAllowedFields([
+          'authorId', 'authorName', 'authorTrustLevel', 'rating', 'comment',
+          'date', 'createdAtMs', 'photos', 'checklist', 'isNegativeReport',
+          'onSiteVerified', 'distanceMeters', 'status', 'statusReason',
+          'confirmations', 'inaccurateFlags', 'ownerResponse'
+        ]) &&
+        data.authorId is string && data.authorId.size() > 0 && data.authorId.size() <= 128 &&
+        data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 80 &&
+        data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+        data.comment is string && data.comment.size() <= 1000 &&
+        data.status in ['published', 'pending_review', 'under_review', 'removed'] &&
+        data.createdAtMs is number && data.createdAtMs > 0 &&
+        (!('photos' in data) || isValidList(data.photos, 5));
+    }
+
+    function isValidModerationItem(data) {
+      return hasRequiredFields(['locationId', 'reviewId', 'reportedBy', 'reason', 'status', 'createdAt']) &&
+        hasOnlyAllowedFields([
+          'locationId', 'reviewId', 'reportedBy', 'reason', 'explanation',
+          'status', 'appealNote', 'enforcementApplied', 'createdAt'
+        ]) &&
+        validStringLength('locationId', 1, 100) &&
+        validStringLength('reviewId', 1, 100) &&
+        validStringLength('reportedBy', 1, 128) &&
+        validStringLength('reason', 1, 80) &&
+        (!('explanation' in data) || (data.explanation is string && data.explanation.size() <= 500)) &&
+        (!('appealNote' in data) || (data.appealNote is string && data.appealNote.size() <= 500)) &&
+        data.status in ['open', 'approved', 'removed', 'appealed'];
+    }
+
+    // ===============================================================
+    // Collection Rules (RBAC Enforced)
+    // ===============================================================
+
+    // Users collection: Private PII (email) readable only by owner or admin.
+    // Users CANNOT self-assign 'moderator' or 'admin' roles or escalate their own role.
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (
+        (isOwner(userId) &&
+         request.resource.data.uid == request.auth.uid &&
+         request.resource.data.role in ['contributor', 'pwd_advocate', 'business_owner'] &&
+         request.resource.data.enforcement == 'active') ||
+        isAdmin()
+      );
+      allow update: if isAuthenticated() && isValidUser(request.resource.data) && (
+        (isOwner(userId) &&
+         areImmutableFieldsUnchanged(['uid', 'role', 'enforcement', 'createdAt'])) ||
+        (isModerator() &&
+         areImmutableFieldsUnchanged(['uid', 'role', 'email', 'createdAt']) &&
+         request.resource.data.enforcement in ['active', 'warned', 'suspended']) ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Locations collection: Authenticated read/contribute; RBAC-protected admin/moderator/owner fields
+    match /locations/{locationId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isNotBanned() && isValidLocation(request.resource.data) &&
+        (!('brigadeFrozen' in request.resource.data) || request.resource.data.brigadeFrozen == false) &&
+        (!('claimedOwner' in request.resource.data) || isBusinessOwner());
+      allow update: if isAuthenticated() && isNotBanned() && isValidLocation(request.resource.data) &&
+        areImmutableFieldsUnchanged(['id', 'createdAt']) &&
+        (areImmutableFieldsUnchanged(['brigadeFrozen']) || isModerator()) &&
+        (areImmutableFieldsUnchanged(['claimedOwner']) || isBusinessOwner());
+      allow delete: if isAdmin();
+
+      // Structured Reviews subcollection
+      match /reviews/{reviewId} {
+        allow read: if isAuthenticated() &&
+          (resource.data.status == 'published' ||
+           isOwner(resource.data.authorId) ||
+           isModerator());
+        allow create: if isAuthenticated() && isNotBanned() &&
+          isValidReview(request.resource.data) &&
+          request.resource.data.authorId == request.auth.uid &&
+          request.resource.data.status in ['published', 'pending_review'];
+        allow update: if isAuthenticated() && isNotBanned() &&
+          isValidReview(request.resource.data) &&
+          areImmutableFieldsUnchanged(['authorId', 'createdAtMs']) && (
+            // Author editing their own report
+            (isOwner(resource.data.authorId) &&
+             areImmutableFieldsUnchanged(['ownerResponse'])) ||
+            // Community quarantine (published -> under_review)
+            (resource.data.status == 'published' &&
+             request.resource.data.status == 'under_review' &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'statusReason'])) ||
+            // Verified business owner posting an official reply
+            (isBusinessOwner() &&
+             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ownerResponse'])) ||
+            // Moderator / Admin resolving status
+            isModerator()
+          );
+        allow delete: if isAdmin();
+      }
+    }
+
+    // Moderation Queue: Moderators & Admins manage; authenticated users can submit reports or appeal their own
+    match /moderationQueue/{itemId} {
+      allow read: if isModerator() ||
+        (isAuthenticated() && resource.data.reportedBy == request.auth.uid);
+      allow create: if isAuthenticated() && isNotBanned() &&
+        isValidModerationItem(request.resource.data) &&
+        request.resource.data.reportedBy == request.auth.uid &&
+        request.resource.data.status == 'open';
+      allow update: if isAuthenticated() && isValidModerationItem(request.resource.data) &&
+        areImmutableFieldsUnchanged(['locationId', 'reviewId', 'reportedBy', 'createdAt']) && (
+          isModerator() ||
+          (resource.data.status == 'removed' &&
+           request.resource.data.status == 'appealed' &&
+           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'appealNote']))
+        );
+      allow delete: if isAdmin();
+    }
+
+    // Default deny everything else
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

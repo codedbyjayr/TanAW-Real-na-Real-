@@ -5,8 +5,10 @@
 
 import { INITIAL_LOCATIONS } from '../data/initialLocations';
 import { LocationPin, LocationTag, Review } from '../types/accessibility';
+import { isWithinMindanaoBounds } from './googleMapsLoader';
 
-const STORAGE_KEY = 'accessmap_cdo_locations_v1';
+const STORAGE_KEY = 'accessmap_locations_v3';
+const LEGACY_STORAGE_KEYS = ['accessmap_locations_v2', 'accessmap_cdo_locations_v1'];
 const VOTES_KEY = 'accessmap_user_votes_v1';
 const CURRENT_USER_KEY = 'accessmap_current_user_v1';
 const USERS_LIST_KEY = 'accessmap_registered_users_v1';
@@ -194,7 +196,13 @@ export interface AuthUser {
   id: string;
   name: string;
   email: string;
-  role: 'PWD Member / Advocate' | 'Caregiver / Family' | 'Community Mapper';
+  role:
+    | 'PWD Member / Advocate'
+    | 'Caregiver / Family'
+    | 'Community Mapper'
+    | 'Business Owner'
+    | 'Moderator'
+    | 'Admin';
   bio?: string;
   createdAt: string;
 }
@@ -238,7 +246,57 @@ interface StoredAccount extends AuthUser {
 export function getCurrentUser(): AuthUser | null {
   try {
     const raw = localStorage.getItem(CURRENT_USER_KEY);
-    return raw ? (JSON.parse(raw) as AuthUser) : null;
+    if (raw) {
+      return JSON.parse(raw) as AuthUser;
+    }
+
+    // Bridge static signin.html / signup.html session ('tanaw_user_session')
+    const staticSessionRaw = localStorage.getItem('tanaw_user_session');
+    if (staticSessionRaw) {
+      const parsed = JSON.parse(staticSessionRaw);
+      if (parsed && (parsed.email || parsed.name)) {
+        const bridgedUser: AuthUser = {
+          id: `usr-${parsed.email || 'guest'}`,
+          name: parsed.name || (parsed.email ? parsed.email.split('@')[0] : 'Guest Explorer'),
+          email: parsed.email || 'guest@tanaw.app',
+          role:
+            parsed.role === 'PWD Member / Advocate' ||
+            parsed.role === 'Caregiver / Family' ||
+            parsed.role === 'Business Owner' ||
+            parsed.role === 'Moderator' ||
+            parsed.role === 'Admin'
+              ? parsed.role
+              : 'Community Mapper',
+          createdAt: new Date(parsed.signedInAt || Date.now()).toISOString(),
+        };
+        return bridgedUser;
+      }
+    }
+
+    // Bridge LoginPage / auth.ts session ('accessmap_session_v1')
+    const authSessionRaw =
+      localStorage.getItem('accessmap_session_v1') ||
+      sessionStorage.getItem('accessmap_session_v1');
+    if (authSessionRaw) {
+      const parsed = JSON.parse(authSessionRaw);
+      if (parsed && (parsed.email || parsed.guest)) {
+        const emailStr = parsed.email || 'guest@tanaw.app';
+        const localName = parsed.guest
+          ? 'Guest Explorer'
+          : (emailStr.split('@')[0] || 'TanAW Explorer')
+              .replace(/[._-]+/g, ' ')
+              .replace(/\b\w/g, (c: string) => c.toUpperCase());
+        return {
+          id: `usr-${emailStr}`,
+          name: localName,
+          email: emailStr,
+          role: 'Community Mapper',
+          createdAt: parsed.signedInAt || new Date().toISOString(),
+        };
+      }
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -248,6 +306,9 @@ export function setCurrentUserSession(user: AuthUser | null): void {
   try {
     if (!user) {
       localStorage.removeItem(CURRENT_USER_KEY);
+      localStorage.removeItem('tanaw_user_session');
+      localStorage.removeItem('accessmap_session_v1');
+      sessionStorage.removeItem('accessmap_session_v1');
     } else {
       localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(user));
     }
@@ -384,28 +445,69 @@ export function sendCommunityMessage(
   return next;
 }
 
+function sanitizeAndDedupeMindanaoLocations(list: LocationPin[]): LocationPin[] {
+  const byId = new Set<string>();
+  const byPlaceId = new Set<string>();
+  const result: LocationPin[] = [];
+
+  for (const loc of list) {
+    if (!loc || typeof loc.lat !== 'number' || typeof loc.lng !== 'number') continue;
+    if (!isWithinMindanaoBounds(loc.lat, loc.lng)) continue;
+    if (loc.googlePlaceId && byPlaceId.has(loc.googlePlaceId)) continue;
+    if (byId.has(loc.id)) continue;
+
+    byId.add(loc.id);
+    if (loc.googlePlaceId) byPlaceId.add(loc.googlePlaceId);
+    result.push(loc);
+  }
+  return result;
+}
+
 export function loadLocations(): LocationPin[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    let raw = localStorage.getItem(STORAGE_KEY);
+    let migratedFromLegacy = false;
+
+    // One-time migration from accessmap_locations_v2 / v1 to accessmap_locations_v3
     if (!raw) {
-      saveLocations(INITIAL_LOCATIONS);
-      return INITIAL_LOCATIONS;
+      for (const legacyKey of LEGACY_STORAGE_KEYS) {
+        const legacyRaw = localStorage.getItem(legacyKey);
+        if (legacyRaw) {
+          raw = legacyRaw;
+          migratedFromLegacy = true;
+          break;
+        }
+      }
     }
+
+    if (!raw) {
+      const seeded = sanitizeAndDedupeMindanaoLocations(INITIAL_LOCATIONS);
+      saveLocations(seeded);
+      return seeded;
+    }
+
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed) || parsed.length === 0) {
-      saveLocations(INITIAL_LOCATIONS);
-      return INITIAL_LOCATIONS;
+      const seeded = sanitizeAndDedupeMindanaoLocations(INITIAL_LOCATIONS);
+      saveLocations(seeded);
+      return seeded;
     }
-    // Add newly published seed venues to existing browsers without overwriting
-    // user edits, ratings, or saved community contributions.
-    const existingIds = new Set(parsed.map((location: LocationPin) => location.id));
-    const newlySeeded = INITIAL_LOCATIONS.filter((location) => !existingIds.has(location.id));
-    if (newlySeeded.length > 0) {
-      const merged = [...parsed, ...newlySeeded];
+
+    const cleaned = sanitizeAndDedupeMindanaoLocations(parsed as LocationPin[]);
+    const existingIds = new Set(cleaned.map((location) => location.id));
+    const existingPlaceIds = new Set(cleaned.map((location) => location.googlePlaceId).filter(Boolean));
+    const newlySeeded = INITIAL_LOCATIONS.filter(
+      (location) =>
+        isWithinMindanaoBounds(location.lat, location.lng) &&
+        !existingIds.has(location.id) &&
+        (!location.googlePlaceId || !existingPlaceIds.has(location.googlePlaceId))
+    );
+
+    const merged = [...cleaned, ...newlySeeded];
+    if (migratedFromLegacy || newlySeeded.length > 0 || cleaned.length !== parsed.length) {
       saveLocations(merged);
-      return merged;
     }
-    return parsed;
+    return merged;
   } catch (err) {
     console.error('Failed to load locations from localStorage:', err);
     return INITIAL_LOCATIONS;
